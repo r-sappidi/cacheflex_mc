@@ -1,0 +1,23 @@
+.agents/
+.codex/
+
+# OS/editor noise
+.DS_Store
+*~
+*.swp
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Common generated/build outputs
+obj_dir/
+build/
+dist/
+*.o
+*.d
+*.a
+*.so
+*.out
+*.vcd
+*.fst

@@ -1,0 +1,68 @@
+Column 1,Load,SPMCP_fetch (coherent),SPMCP_install (SPM),Store/SPMWB_store (coherent),SPMWB_read (SPM),SPM_release,SPMLD,SPMST,Replacement,Fwd-GetS,Fwd-GetM,Inv,Put-Ack,"Exclusive Data 
+from Dir","Data from Dir
+(ack=0)","Data from Dir 
+(ack>0)","Data from 
+Owner",Inv-Ack,Last-Inv-Ack
+I,Sent GetS to Dir/IS^D,"Send GetS_Silent to Dir
+/II^D","Install SPM data
+/X","Send GetM to Dir
+/IM^AD",Return zero,,Return zero,Ignore,,,,,,,,,,,
+IS^D,Stall,Stall,Stall,Stall,Return zero,,Return zero,Ignore,Stall,,,Stall,,-/E,-/S,,-/S,,
+IM^AD,Stall,Stall,Stall,Stall,Return zero,,Return zero,Ignore,Stall,Stall,Stall,,,,-/M,-/IM^A,-/M,ack--,
+IM^A,Stall,Stall,Stall,Stall,Return zero,,Return zero,Ignore,Stall,Stall,Stall,,,,,,,ack--,-/M
+S,Hit,Hit,"Begin SPM way claim,
+try lazy migrate S line to eligible non-SPM way
+/SX^L","Send GetM to Dir
+/SM^AD",Return zero,,Return zero,Ignore,"Send PutS to Dir
+/SI^A
+",,,"Send Inv-Ack to Req
+/I",,,,,,,
+SX^L,Stall,Stall,"If migration succeeds: install SPM data
+/X
+If no eligible non-SPM destination: Send PutS to Dir
+/SX^A*",Stall,Stall,,Stall,Stall,Stall,Stall,Stall,"Send Inv-Ack to Req; coherent S copy invalidated, 
+then install/update SPM data
+/X",,,,,,,
+SX^A*,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,Stall,Stall,Stall,"Send Inv-Ack to Req
+/SX^A*","Install SPM data after PutS ack
+/X",,,,,,
+SM^AD,Hit,Stall,Stall,Stall,Return zero,,Return zero,Ignore,Stall,Stall,Stall,"Send Inv-Ack to Req
+/IM^AD",,,-/M,-/SM^A,,ack--,
+SM^A,Hit,Stall,Stall,Stall,Return zero,,Return zero,Ignore,Stall,Stall,Stall,,,,,,,ack--,-/M
+M,Hit,Hit,"Begin SPM way claim,
+try lazy migrate dirty M line to eligible non-SPM way
+/MX^L",Hit,Return zero,,Return zero,Ignore,"Send PutM+data to Dir
+/MI^A
+","Send data to Req and Dir
+/S","Send data to Req
+/I",,,,,,,,
+MX^L,Stall,Stall,"If migration succeeds: install SPM data
+/X
+If no eligible non-SPM destination: Send PutM+data to Dir
+/MX^A*",Stall,Stall,,Stall,Stall,Stall,Stall,Stall,,,,,,,,
+MX^A*,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,Stall,Stall; PutM in progress,Stall; PutM in progress,,"Install SPM data after PutM ack
+/X",,,,,,
+E,Hit,Hit,"Begin SPM way claim,
+try lazy migrate E line to eligible non-SPM way
+/EX^L",Hit/M,Return zero,,Return zero,Ignore,"Send PutE to Dir
+/EI^A
+","Send data to Req and Dir
+/S","Send data to Req
+/I",,,,,,,,
+EX^L,Stall,Stall,"If migration succeeds: install SPM data
+/X
+If no eligible non-SPM destination: Send PutE to Dir
+/EX^A*",Stall,Stall,,Stall,Stall,Stall,Stall,Stall,,,,,,,,
+EX^A*,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,Stall,Stall,Stall,,"Install SPM data after PutE ack
+/X",,,,,,
+MI^A,Stall,Stall,Stall,Stall,Return zero,,Return zero,Ignore,Stall,"Send data to Req and Dir
+/SI^A","Send data to Req
+/II^A",,-/I,,,,,,
+EI^A,Stall,Stall,Stall,Stall,Return zero,,Return zero,Ignore,Stall,"Send data to Req and Dir
+/SI^A","Send data to Req
+/II^A",,-/I,,,,,,
+SI^A,Stall,Stall,Stall,Stall,Return zero,,Return zero,Ignore,Stall,,,"Send Inv-Ack to Req
+/II^A",-/I,,,,,,
+II^A,Stall,Stall,Stall,Stall,Return zero,,Return zero,Ignore,Stall,,,,-/I,,,,,,
+II^D,Stall,Stall,Stall,Stall,Return zero,,Return zero,Ignore,Stall,,,,,Route to SPM/I,Route to SPM/I,,Route to SPM/I,,
+X,,,Install SPM Data/X,,Return SPM data/X,,Update SPM Data/X,,,,,,,,,,,,
