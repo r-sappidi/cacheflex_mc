@@ -1,0 +1,70 @@
+Column 1,Load,SPMCP_fetch (coherent),SPMCP_install (SPM),SPMWB_store,Store,SPMWB_read (SPM),SPM_release,SPMLD (SPM),SPMST (SPM),SPMWB_Ack,Replacement,Fwd-GetS,Fwd-GetM,Inv,Put-Ack,"Exclusive Data 
+from Dir","Data from Dir
+(ack=0)","Data from Dir 
+(ack>0)","Data from 
+Owner",Inv-Ack,Last-Inv-Ack
+I,Sent GetS to Dir/IS^D,"Send GetS_Silent to Dir
+/IX^D",,Return zero,"Send GetM to Dir
+/IM^AD",Return zero,,Return zero,Ignore,,,,,,,,,,,,
+IS^D,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,,,Stall,,-/E,-/S,,-/S,,
+IM^AD,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,Stall,Stall,,,,-/M,-/IM^A,-/M,ack--,
+IM^A,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,Stall,Stall,,,,,,,ack--,-/M
+S,Hit,"Hit, send PutS/SX^A","Migrate data to 
+available non-SPM way when 
+available/S",Return zero,"Send GetM to Dir
+/SM^AD",Return zero,,Return zero,Ignore,,"Send PutS to Dir
+/SI^A
+",,,"Send Inv-Ack to Req
+/I",,,,,,,
+SX^A,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,"Send data to Req and Dir
+/SX^A","Send data to Req
+/IX^A","Send Inv-Ack to Req
+/SX^A","Install SPM data after PutS ack
+/X",,,,,,
+SM^AD,Hit,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,Stall,Stall,"Send Inv-Ack to Req
+/IM^AD",,,-/M,-/SM^A,,ack--,
+SM^A,Hit,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,Stall,Stall,,,,,,,ack--,-/M
+M,Hit,"Hit, send PutM/MX^A","Migrate data to 
+available non-SPM way when 
+available/M",Return zero,Hit,Return zero,,Return zero,Ignore,,"Send PutM+data to Dir
+/MI^A
+","Send data to Req and Dir
+/S","Send data to Req
+/I",,,,,,,,
+MX^A,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,"Send data to Req and Dir
+/SX^A","Send data to Req
+/IX^A",,"Install SPM data after PutM ack
+/X",,,,,,
+E,Hit,"Hit, send PutE/EX^A","Migrate data to 
+available non-SPM way when 
+available/E",Return zero,Hit/M,Return zero,,Return zero,Ignore,,"Send PutE to Dir
+/EI^A
+","Send data to Req and Dir
+/S","Send data to Req
+/I",,,,,,,,
+EX^A,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,"Send data to Req and Dir
+/SX^A","Send data to Req
+/IX^A",,"Install SPM data after PutE ack
+/X",,,,,,
+MI^A,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,"Send data to Req and Dir
+/SI^A","Send data to Req
+/II^A",,-/I,,,,,,
+EI^A,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,"Send data to Req and Dir
+/SI^A","Send data to Req
+/II^A",,-/I,,,,,,
+SI^A,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,,,"Send Inv-Ack to Req
+/II^A",-/I,,,,,,
+II^A,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,,,,-/I,,,,,,
+IX^D,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,,,,,Route to SPM/X,Route to SPM/X,,Route to SPM/X,,
+X,,,,"Send SPMWBReq(addr, SPM_data) to Dir 
+/ XWB",,Return SPM data/X,"Drop SPM data, clear 
+scratchpad bit / I",Return SPM data/X,Update SPM Data/X,,,,,,,,,,,,
+XWB,,,,Stall,,Stall,Stall,Stall,Stall, - / X,,,,,,,,,,,
+,,,,,,,,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,,,,,,,
+X,SPM State,,,,,,,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,,,,,,,
+IX^D,"Keeps cache line invalid in coherence domain, but still sends fetch and routes data to SPM",,,,,,,,,,,,,,,,,,,,

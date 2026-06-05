@@ -1,0 +1,6 @@
+protocol "MESI_Two_Level_SPM" use_secondary_load_linked;
+include "MESI_Two_Level_SPM-msg.sm";
+include "MESI_Two_Level_SPML1.sm";
+include "MESI_Two_Level_SPML2.sm";
+include "MESI_Two_Level_SPM-dir.sm";
+include "MESI_Two_Level-dma.sm";

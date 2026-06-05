@@ -1,0 +1,8 @@
+protocol "MESI_Three_Level_SPM" use_secondary_load_linked, use_secondary_store_conditional, supports_flushes;
+include "MESI_Two_Level_SPM-msg.sm";
+include "MESI_Three_Level_SPM-msg.sm";
+include "MESI_Three_Level_SPM-L0cache.sm";
+include "MESI_Three_Level_SPM-L1cache.sm";
+include "MESI_Three_Level_SPM-L2cache.sm";
+include "MESI_Three_Level_SPM-dir.sm";
+include "MESI_Two_Level-dma.sm";
