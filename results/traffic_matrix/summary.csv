@@ -1,0 +1,9 @@
+run,kernel,mode,cores,sim_ticks,control_msgs,response_data_msgs,network_msgs,control_bytes,response_data_bytes,network_bytes,l2_gets,l2_getx,l1_misses,l3_stalls,generator_packets,shared_vs_private_network_bytes,shared_vs_private_l3_stalls
+gemm_private_4c,gemm,private,4,203000,334,85,419,2672,6120,8792,36,48,84,0,88,,
+gemm_shared_4c,gemm,shared,4,203000,342,193,535,2736,13896,16632,52,143,136,94,140,1.892,94.0
+gemm_private_8c,gemm,private,8,203000,590,85,675,4720,6120,10840,72,76,148,0,156,,
+gemm_shared_8c,gemm,shared,8,203000,600,325,925,4800,23400,28200,97,418,265,338,273,2.601,338.0
+flash_private_4c,flash,private,4,203000,334,85,419,2672,6120,8792,76,8,84,0,88,,
+flash_shared_4c,flash,shared,4,203000,354,208,562,2832,14976,17808,126,27,142,18,146,2.025,18.0
+flash_private_8c,flash,private,8,203000,590,85,675,4720,6120,10840,132,16,148,0,156,,
+flash_shared_8c,flash,shared,8,203000,634,368,1002,5072,26496,31568,248,73,282,60,290,2.912,60.0

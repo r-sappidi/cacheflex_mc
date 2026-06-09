@@ -1,0 +1,3 @@
+cores,coherent_shared_network_bytes,vspm_like_private_network_bytes,bytes_removed,bytes_removed_pct_of_shared,shared_bytes_per_packet,vspm_bytes_per_packet,bytes_per_packet_reduction_pct,shared_l2_getx,vspm_l2_getx,getx_removed_pct,shared_l1_misses,vspm_l1_misses,l1_misses_removed_pct,shared_l3_stall_events,vspm_l3_stall_events,l3_stall_events_removed,fixed_window_ticks
+4,16632,8792,7840,47.138047138047135,118.8,99.9090909090909,15.901438628711356,143,48,66.43356643356644,136,84,38.23529411764706,94,0,94,203000
+8,28200,10840,17360,61.56028368794326,103.2967032967033,69.48717948717949,32.73049645390071,418,76,81.81818181818181,265,148,44.15094339622642,338,0,338,203000
