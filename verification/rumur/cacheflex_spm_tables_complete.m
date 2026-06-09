@@ -498,7 +498,7 @@ Owner"
     cc_state = C_SXA
   ==>
   begin
-    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+    cc_state := C_SXA;
   endrule;
 
   rule "CC SX^A x Fwd-GetM"
@@ -864,7 +864,7 @@ Owner"
     cc_state = C_MXA
   ==>
   begin
-    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+    cc_state := C_SXA;
   endrule;
 
   rule "CC MX^A x Fwd-GetM"
@@ -1025,7 +1025,7 @@ Owner"
     cc_state = C_EXA
   ==>
   begin
-    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+    cc_state := C_SXA;
   endrule;
 
   rule "CC EX^A x Fwd-GetM"
