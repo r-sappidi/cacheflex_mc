@@ -2678,7 +2678,18 @@ let {{
              'ea_code' : (sveEnabledCheckCode + eaCode),
              'fault_code' : '',
              'fa_code' : load_fa_code,
-             'constructor': 'this->memAccessFlags |= Request::SPMLD;'},
+             'constructor': '''
+             setSrcRegIdx(_numSrcRegs++,
+                 gem5::ArmISA::couldBeZero(base) ? RegId() : intRegClass[base]);
+             setSrcRegIdx(_numSrcRegs++, miscRegClass[MISCREG_CPSR]);
+             setSrcRegIdx(_numSrcRegs++, vecPredRegClass[gp]);
+             setDestRegIdx(_numDestRegs++, vecRegClass[dest]);
+             _numTypedDestRegs[vecRegClass.type()]++;
+             setSrcRegIdx(_numSrcRegs++, miscRegClass[MISCREG_CPACR_EL1]);
+             flags[IsInteger] = true;
+             flags[IsLoad] = true;
+             flags[IsVector] = true;
+             this->memAccessFlags |= Request::SPMLD | Request::PHYSICAL;'''},
             ['IsLoad'])
         spmStIop = ArmInstObjParams('spm.st1', 'SpmContigStoreSI',
             'SveContigMemSI',
@@ -2688,7 +2699,17 @@ let {{
              'memacc_code': storeMemAccCode,
              'ea_code' : (sveEnabledCheckCode + eaCode),
              'fa_code' : store_fa_code,
-             'constructor': 'this->memAccessFlags |= Request::SPMST;'},
+             'constructor': '''
+             setSrcRegIdx(_numSrcRegs++,
+                 gem5::ArmISA::couldBeZero(base) ? RegId() : intRegClass[base]);
+             setSrcRegIdx(_numSrcRegs++, miscRegClass[MISCREG_CPSR]);
+             setSrcRegIdx(_numSrcRegs++, vecPredRegClass[gp]);
+             setSrcRegIdx(_numSrcRegs++, vecRegClass[dest]);
+             setSrcRegIdx(_numSrcRegs++, miscRegClass[MISCREG_CPACR_EL1]);
+             flags[IsInteger] = true;
+             flags[IsStore] = true;
+             flags[IsVector] = true;
+             this->memAccessFlags |= Request::SPMST | Request::PHYSICAL;'''},
             ['IsStore'])
 
         header_output += SveContigMemSIOpDeclare.subst(spmLdIop)
@@ -2769,7 +2790,18 @@ let {{
              'ea_code': (sveEnabledCheckCode + eaCode),
              'fault_code': '',
              'fa_code': load_fa_code,
-             'constructor': 'this->memAccessFlags |= Request::SPMLD;'},
+             'constructor': '''
+             setSrcRegIdx(_numSrcRegs++,
+                 gem5::ArmISA::couldBeZero(base) ? RegId() : intRegClass[base]);
+             setSrcRegIdx(_numSrcRegs++, miscRegClass[MISCREG_CPSR]);
+             setSrcRegIdx(_numSrcRegs++, vecPredRegClass[gp]);
+             setDestRegIdx(_numDestRegs++, vecRegClass[dest]);
+             _numTypedDestRegs[vecRegClass.type()]++;
+             setSrcRegIdx(_numSrcRegs++, miscRegClass[MISCREG_CPACR_EL1]);
+             flags[IsInteger] = true;
+             flags[IsLoad] = true;
+             flags[IsVector] = true;
+             this->memAccessFlags |= Request::SPMLD | Request::PHYSICAL;'''},
             ['IsLoad'])
         header_output += SveContigMemSIOpDeclare.subst(iop)
         exec_output += (

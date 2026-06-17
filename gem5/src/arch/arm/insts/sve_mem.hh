@@ -40,6 +40,7 @@
 
 #include "arch/arm/insts/static_inst.hh"
 #include "arch/arm/tlb.hh"
+#include "mem/request.hh"
 
 namespace gem5
 {
@@ -57,7 +58,7 @@ class SveMemVecFillSpill : public ArmStaticInst
     /// True if the base register is SP (used for SP alignment checking).
     bool baseIsSP;
 
-    unsigned memAccessFlags;
+    Request::FlagsType memAccessFlags;
 
     SveMemVecFillSpill(const char *mnem, ExtMachInst _machInst,
                        OpClass __opClass, RegIndex _dest,
@@ -83,7 +84,7 @@ class SveMemPredFillSpill : public ArmStaticInst
     /// True if the base register is SP (used for SP alignment checking).
     bool baseIsSP;
 
-    unsigned memAccessFlags;
+    Request::FlagsType memAccessFlags;
 
     SveMemPredFillSpill(const char *mnem, ExtMachInst _machInst,
                         OpClass __opClass, RegIndex _dest,
@@ -110,7 +111,7 @@ class SveContigMemSS : public ArmStaticInst
     /// True if the base register is SP (used for SP alignment checking).
     bool baseIsSP;
 
-    unsigned memAccessFlags;
+    Request::FlagsType memAccessFlags;
 
     SveContigMemSS(const char *mnem, ExtMachInst _machInst, OpClass __opClass,
                    RegIndex _dest, RegIndex _gp, RegIndex _base,
@@ -137,7 +138,7 @@ class SveContigMemSI : public ArmStaticInst
     /// True if the base register is SP (used for SP alignment checking).
     bool baseIsSP;
 
-    unsigned memAccessFlags;
+    Request::FlagsType memAccessFlags;
 
     SveContigMemSI(const char *mnem, ExtMachInst _machInst, OpClass __opClass,
                    RegIndex _dest, RegIndex _gp, RegIndex _base,

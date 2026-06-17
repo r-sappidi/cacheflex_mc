@@ -1,11 +1,15 @@
-State,SPMWB_Req,GetS_silent,GetS,GetM,PutS-NotLast,PutS-Last,PutM+data from Owner,PutM from Non-Owner,PutE (no-data) from Owner,PutE from Non-Owner,Data
-I,"Writeback data, send SPMWB_Ack","Send data to Req, do not set Owner","Send Exclusive data to Req, set Owner to Req/E","Send data to Req, set Owner to Req/M",Send Put-Ack to Req,Send Put-Ack to Req,,Send Put-Ack to Req,,Send Put-Ack to Req,
-S,,"Send data to Req, do not modify sharer list","Send data to Req, add Req to Sharers","Send data to Req, send Inv to Sharers, clear Sharers, set Owner to Req/M","Remove Req from Sharers, send Put-Ack to Req","Remove Req from Sharers, send Put-Ack to Req/I",,"Remove Req from Sharers, send Put-Ack to Req",,"Remove Req from Sharers, send Put-Ack to Req",
-E,,"Forward GetS to Owner, make Owner sharer, do NOT add Req to Sharers, clear Owner, set MSHR.silent / SD","Forward GetS to Owner, make Owner sharer, add Req to Sharers, clear Owner /SD","Forward GetM to Owner, set Owner to Req/M",Send Put-Ack to Req,Send Put-Ack to Req,"Copy data to mem, send Put-Ack to Req, clear Owner/I",Send Put-Ack to Req,"Send Put-Ack to Req, clear Owner/I",Send Put-Ack to Req,
-M,,"Forward GetS to Owner, make Owner sharer, do NOT add Req to Sharers, clear Owner, set MSHR.silent / SD","Forward GetS to Owner, make Owner sharer, add Req to Sharers, clear Owner /SD","Forward GetM to Owner, set Owner to Req/M",Send Put-Ack to Req,Send Put-Ack to Req,"Copy data to mem, send Put-Ack to Req, clear Owner/I",Send Put-Ack to Req,,Send Put-Ack to Req,
-SD,,Stall,Stall,Stall,"Remove Req from Sharers, send Put-Ack to Req","Remove Req from Sharers, send Put-Ack to Req","Send data to req, add as sharer if MSHR.silent is false, clear MSHR, go to I (MSHR.silent true) or S (false)","Remove Req from Sharers, send Put-Ack to Req","Send data to req, add as sharer if MSHR.silent is false, clear MSHR, go to I (MSHR.silent true) or S (false)","Remove Req from Sharers, send Put-Ack to Req","Copy data to LLC/mem
-if MSHR.silent:
-        send to original SPM requester, do not add as sharer;
-else:
-        send to original requester;
-/S"
+State,SPMWB_Req,GetS_silent,GetS,GetM,PutS-NotLast,PutS-Last,PutM+data from Owner,PutM from Non-Owner,PutE (no-data) from Owner,PutE from Non-Owner,SPM_PutS/PutE,SPM_PutM,Unblock,Data
+I,"Alloc + write data to LLC, clear SPM owner, issue WB to memory /SPM_WB; on memory Ack send SPMWB_Ack to L1, -> M",Miss: issue silent fetch to memory /SPM_IS; on Mem_Data send snapshot to Req and drop block (-> I); no owner/sharer set,"Send Exclusive data to Req, set Owner to Req/E","Send data to Req, set Owner to Req/M",Send Put-Ack to Req,Send Put-Ack to Req,,Send Put-Ack to Req,,Send Put-Ack to Req,,,,
+S,"Alloc + write data to LLC, clear SPM owner, issue WB to memory /SPM_WB; on memory Ack send SPMWB_Ack to L1, -> M",Send SPM snapshot to Req; do NOT add sharer (stay S),"Send data to Req, add Req to Sharers","Send data to Req, send Inv to Sharers, clear Sharers, set Owner to Req/M","Remove Req from Sharers, send Put-Ack to Req","Remove Req from Sharers, send Put-Ack to Req/I",,"Remove Req from Sharers, send Put-Ack to Req",,"Remove Req from Sharers, send Put-Ack to Req","Remove Req from Sharers, send Put-Ack (stay S)","Remove Req from Sharers, write data to LLC, send Put-Ack (stay S)",,
+E,"Alloc + write data to LLC, clear SPM owner, issue WB to memory /SPM_WB; on memory Ack send SPMWB_Ack to L1, -> M",Forward silent GetS to Owner /SD; owner keeps the line; requester NOT added as a sharer,"Forward GetS to Owner, make Owner sharer, add Req to Sharers, clear Owner /SD","Forward GetM to Owner, set Owner to Req/M",Send Put-Ack to Req,Send Put-Ack to Req,"Copy data to mem, send Put-Ack to Req, clear Owner/I",Send Put-Ack to Req,"Send Put-Ack to Req, clear Owner/I",Send Put-Ack to Req,"Clear SPM owner, send Put-Ack (/M, owner cleared)","Clear SPM owner, write data to LLC, send Put-Ack (/M, owner cleared)",,
+M,"Alloc + write data to LLC, clear SPM owner, issue WB to memory /SPM_WB; on memory Ack send SPMWB_Ack to L1, -> M",Forward silent GetS to Owner /SD; owner keeps the line; requester NOT added as a sharer,"Forward GetS to Owner, make Owner sharer, add Req to Sharers, clear Owner /SD","Forward GetM to Owner, set Owner to Req/M",Send Put-Ack to Req,Send Put-Ack to Req,"Copy data to mem, send Put-Ack to Req, clear Owner/I",Send Put-Ack to Req,,Send Put-Ack to Req,"Clear SPM owner, send Put-Ack (/M, owner cleared)","Clear SPM owner, write data to LLC, send Put-Ack (/M, owner cleared)",,
+SD,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Owner completed silent snapshot -> E/M (owner unchanged); requester not a sharer,
+
+Legend (textbook notation; SLICC source MESI_Three_Level_SPM-L2cache.sm)
+I = NP,no copy in LLC
+S,"shared, LLC has data + sharer list (SS)"
+E / M,"line owned by a local L1 (MT); E=clean, M=dirty owner"
+SD,"MT_SPMS: silent GetS forwarded to the owner, awaiting the owner's Unblock"
+SPM_PutS/PutE/PutM,an L1 relinquishing its coherent copy to claim its SPM slot (clears the SPM owner; line stays cached in the LLC)
+GetS_silent,snapshot fetch for an L1 SPMCP_fetch; the requester is never added as a sharer (the line leaves the coherence domain)
+SPMWB_Req,SPM dirty-slot writeback; data goes to memory via SPM_WB before the L1 is acked

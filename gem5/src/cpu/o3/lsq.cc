@@ -1095,7 +1095,11 @@ LSQ::LSQRequest::addReq(Addr addr, unsigned size,
         if (req->isSPMRequest()) {
             Addr spm_src = addr;
             Addr spm_dst = addr;
-            if ((req->isSPMCPFetch() || req->isSPMWBStore()) && _data) {
+            if (req->isSPMCPFetch() && _data) {
+                spm_dst = 0;
+                const unsigned copy_size = std::min<unsigned>(sizeof(Addr), size);
+                std::memcpy(&spm_dst, _data, copy_size);
+            } else if (req->isSPMWBStore() && _data) {
                 spm_src = 0;
                 const unsigned copy_size = std::min<unsigned>(sizeof(Addr), size);
                 std::memcpy(&spm_src, _data, copy_size);

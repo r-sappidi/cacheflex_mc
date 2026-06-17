@@ -62,6 +62,41 @@ namespace gem5
 namespace ruby
 {
 
+namespace
+{
+
+Addr
+rubyRequestAddress(PacketPtr pkt, RubyRequestType type)
+{
+    if (!pkt->req->isSPMRequest()) {
+        return pkt->getAddr();
+    }
+
+    if (type == RubyRequestType_SPMCP_fetch) {
+        // The packet address is the translated physical source address.
+        // getSPMSrcAddr() holds the virtual address captured when the LSQ
+        // created the request, before translation, and must not be used to
+        // key coherence.
+        return pkt->getAddr();
+    }
+
+    if (type == RubyRequestType_SPMWB_store) {
+        return pkt->req->getSPMSrcAddr();
+    }
+
+    if (type == RubyRequestType_SPMCP_install ||
+        type == RubyRequestType_SPMLD ||
+        type == RubyRequestType_SPMST ||
+        type == RubyRequestType_SPMWB_read ||
+        type == RubyRequestType_SPM_release) {
+        return pkt->req->getSPMDstAddr();
+    }
+
+    return pkt->getAddr();
+}
+
+} // anonymous namespace
+
 Sequencer::Sequencer(const Params &p)
     : RubyPort(p), m_IncompleteTimes(MachineType_NUM),
       deadlockCheckEvent([this]{ wakeup(); }, "Sequencer deadlock check")
@@ -359,7 +394,7 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType primary_type,
         return RequestStatus_Aliased;
     }
 
-    Addr line_addr = makeLineAddress(pkt->getAddr());
+    Addr line_addr = makeLineAddress(rubyRequestAddress(pkt, primary_type));
     // Check if there is any outstanding request for the same cache line.
     auto &seq_req_list = m_RequestTable[line_addr];
 
@@ -1151,9 +1186,10 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
                     msg->m_tlbiTransactionUid);
         }
     } else {
+        Addr request_addr = rubyRequestAddress(pkt, secondary_type);
         msg = std::make_shared<RubyRequest>(clockEdge(), blk_size,
                                             m_ruby_system,
-                                            pkt->getAddr(), pkt->getSize(),
+                                            request_addr, pkt->getSize(),
                                             pc, secondary_type,
                                             RubyAccessMode_Supervisor, pkt,
                                             PrefetchBit_No, proc_id, core_id);
@@ -1171,10 +1207,25 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
         }
 
         if (pkt->req->isSPMRequest()) { // C6
-            msg->m_SrcAddr = pkt->req->getSPMSrcAddr(); // C6
-            msg->m_DstSPMAddr = pkt->req->getSPMDstAddr(); // C6
-            msg->m_SPMSet = pkt->req->getSPMSet(); // C6
-            msg->m_SPMWay = pkt->req->getSPMWay(); // C6
+            if (pkt->req->isSPMWBStore()) {
+                const Addr spm_slot = pkt->req->getSPMSrcAddr();
+                msg->m_SrcAddr = pkt->getAddr();
+                msg->m_DstSPMAddr = spm_slot;
+                msg->m_SPMSet = static_cast<int>((spm_slot >> 6) & 0x3ff);
+                msg->m_SPMWay = static_cast<int>((spm_slot >> 16) & 0x7);
+            } else {
+                // For SPMCP_fetch the coherent source is the packet's own
+                // translated physical address; the metadata copy is virtual.
+                msg->m_SrcAddr = pkt->req->isSPMCPFetch() ?
+                    pkt->getAddr() : pkt->req->getSPMSrcAddr(); // C6
+                msg->m_DstSPMAddr = pkt->req->getSPMDstAddr(); // C6
+                msg->m_SPMSet = pkt->req->getSPMSet(); // C6
+                // Mask to the 8-way guide geometry so software can place the
+                // encoded slot window at a physical base above the SE image
+                // pages (which are allocated upward from PA 0 and would
+                // otherwise alias SPM slots).
+                msg->m_SPMWay = pkt->req->getSPMWay() & 0x7; // C6
+            }
         }
 
         DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %#x %s\n",

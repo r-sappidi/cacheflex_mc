@@ -43,11 +43,16 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
    int l2_select_num_bits;
    Cycles l1_request_latency := 2;
    Cycles l1_response_latency := 2;
+   // Models the private-L2 SPM array access plus return to Ruby L0.
+   Cycles spm_response_latency := 6;
    Cycles to_l2_latency := 1;
 
    // Message Buffers between the L1 and the L0 Cache
    // From the L1 cache to the L0 cache
    MessageBuffer * bufferToL0, network="To";
+
+   // Dedicated private-L1 SPM response path.
+   MessageBuffer * spmBufferToL0, network="To";
 
    // From the L0 cache to the L1 cache
    MessageBuffer * bufferFromL0, network="From";
@@ -133,6 +138,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     // other requests
     Fwd_GETX,   desc="GETX from other processor";
     Fwd_GETS,   desc="GETS from other processor";
+    Fwd_GETS_Silent, desc="Silent SPM-copy GETS from another core; supply a data snapshot without changing this owner's coherence state";
 
     Data,       desc="Data for processor";
     Data_Exclusive,       desc="Data for processor";
@@ -349,6 +355,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   out_port(responseNetwork_out, ResponseMsg, responseToL2);
   out_port(unblockNetwork_out, ResponseMsg, unblockToL2);
   out_port(bufferToL0_out, CoherenceMsg, bufferToL0);
+  out_port(spmBufferToL0_out, CoherenceMsg, spmBufferToL0);
 
   // Response From the L2 Cache to this L1 cache
   in_port(responseNetwork_in, ResponseMsg, responseFromL2, rank = 2) {
@@ -425,6 +432,16 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
                         cache_entry, tbe);
             } else {
                 trigger(Event:Fwd_GETS, in_msg.addr, cache_entry, tbe);
+            }
+        } else if (in_msg.Type == CoherenceRequestType:GETS_SILENT) {
+            // A silent SPM-copy snapshot. If the freshest data is still down
+            // in L0, recall it first (reusing the normal L0 invalidation path);
+            // otherwise hand back a snapshot without disturbing coherence.
+            if (is_valid(cache_entry) && inL0Cache(cache_entry.CacheState)) {
+                trigger(Event:L0_Invalidate_Else, in_msg.addr,
+                        cache_entry, tbe);
+            } else {
+                trigger(Event:Fwd_GETS_Silent, in_msg.addr, cache_entry, tbe);
             }
         } else if (in_msg.Type == CoherenceRequestType:FLUSH_DATA) {
             trigger(Event:External_Flush_Data, in_msg.addr, cache_entry, tbe);
@@ -761,6 +778,25 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     }
   }
 
+  action(spm_sendSilentDataToRequestor, "spsd", desc="send an SPM data snapshot to a silent requester without any coherence-state change") {
+    peek(requestNetwork_in, RequestMsg) {
+      enqueue(responseNetwork_out, ResponseMsg, l1_response_latency) {
+        assert(is_valid(cache_entry));
+        out_msg.addr := address;
+        out_msg.DstSPMAddr := in_msg.DstSPMAddr;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.DataBlk := cache_entry.DataBlk;
+        out_msg.Dirty := false;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Response_Data;
+        // No outstanding acks: the requester completes immediately and
+        // installs the snapshot into its private SPM slot.
+        out_msg.AckCount := 0;
+      }
+    }
+  }
+
   action(j_sendUnblock, "j", desc="send unblock to the L2 cache") {
     enqueue(unblockNetwork_out, ResponseMsg, to_l2_latency) {
       out_msg.addr := address;
@@ -1017,7 +1053,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   action(spm_readHitToL0, "sprh", desc="Return SPM data to L0") {
-    enqueue(bufferToL0_out, CoherenceMsg, l1_response_latency) {
+    enqueue(spmBufferToL0_out, CoherenceMsg, spm_response_latency) {
       assert(is_valid(cache_entry));
       assert(cache_entry.isScratchpad());
       out_msg.addr := address;
@@ -1031,7 +1067,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
   action(spm_readZeroToL0, "sprz", desc="Return zero for absent/non-SPM SPM read") {
     spmZeroData.clear();
-    enqueue(bufferToL0_out, CoherenceMsg, l1_response_latency) {
+    enqueue(spmBufferToL0_out, CoherenceMsg, spm_response_latency) {
       out_msg.addr := address;
       out_msg.Class := CoherenceClass:SPM_DATA;
       out_msg.Sender := machineID;
@@ -1043,7 +1079,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
   action(spm_ackToL0, "spak", desc="Ack SPM write-like operation to L0") {
     spmZeroData.clear();
-    enqueue(bufferToL0_out, CoherenceMsg, l1_response_latency) {
+    enqueue(spmBufferToL0_out, CoherenceMsg, spm_response_latency) {
       out_msg.addr := address;
       out_msg.Class := CoherenceClass:SPM_ACK;
       out_msg.Sender := machineID;
@@ -1199,8 +1235,43 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     z0_stallAndWaitL0Queue;
   }
 
-  transition({SX_L0, MX_L0, EX_L0, SX_A, MX_A, EX_A, IX_D, XWB},
+  transition({SX_L0, MX_L0, EX_L0, SX_A, IX_D, XWB},
              {Fwd_GETS, Fwd_GETX, Inv}) {
+    z2_stallAndWaitL2Queue;
+  }
+
+  // A core mid-SPMCP_fetch that still holds the coherent line (MX_A/EX_A) can
+  // service a *normal* coherent GETS just like a plain MM/EE owner: hand data
+  // to the requester, write back to L2, and downgrade to the shared SPM-fetch
+  // wait state SX_A. The requester becomes a real sharer and will unblock L2,
+  // so this does not hang the way a stalled Fwd_GETS would. This core's own
+  // SPMCP_fetch still completes via its outstanding PUT and Put_Ack.
+  transition({MX_A, EX_A}, Fwd_GETS, SX_A) {
+    d_sendDataToRequestor;
+    d2_sendDataToL2;
+    l_popL2RequestQueue;
+  }
+
+  // GETX/Inv still need the line fully relinquished; hold them until this
+  // core's own SPM fetch has drained (reaches X), as before.
+  transition({MX_A, EX_A}, {Fwd_GETX, Inv}) {
+    z2_stallAndWaitL2Queue;
+  }
+
+  // Silent SPM snapshot: the data is resident in this L1 (MM/EE) or this core
+  // is itself mid-SPMCP_fetch but still holds the coherent line (MX_A/EX_A).
+  // Hand back a copy and Unblock L2 (which releases the owner's stalled PUT),
+  // leaving this owner's coherence state untouched.
+  transition({MM, EE, MX_A, EX_A}, Fwd_GETS_Silent) {
+    spm_sendSilentDataToRequestor;
+    j_sendUnblock;
+    l_popL2RequestQueue;
+  }
+
+  // The freshest data has not settled into this L1 yet (still recalling L0 for
+  // our own SPMCP_fetch, installing, or writing back). Stall until it has, then
+  // the transition above fires.
+  transition({SX_L0, MX_L0, EX_L0, IX_D, XWB}, Fwd_GETS_Silent) {
     z2_stallAndWaitL2Queue;
   }
 
@@ -1218,27 +1289,35 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     k_popL0RequestQueue;
   }
 
-  transition(S, SPMCP_fetch, SX_L0) {
+  transition(S, SPMCP_fetch, S) {
     spm_allocateTBE;
-    forward_eviction_to_L0_own;
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
     k_popL0RequestQueue;
   }
 
-  transition(SS, SPMCP_fetch, SX_A) {
+  transition(SS, SPMCP_fetch, SS) {
     spm_allocateTBE;
-    spm_issuePUTS;
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
     k_popL0RequestQueue;
   }
 
-  transition(E, SPMCP_fetch, EX_L0) {
+  transition(E, SPMCP_fetch, E) {
     spm_allocateTBE;
-    forward_eviction_to_L0_own;
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
     k_popL0RequestQueue;
   }
 
-  transition(EE, SPMCP_fetch, EX_A) {
+  transition(EE, SPMCP_fetch, EE) {
     spm_allocateTBE;
-    spm_issuePUTE;
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
     k_popL0RequestQueue;
   }
 
@@ -1248,31 +1327,47 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     k_popL0RequestQueue;
   }
 
-  transition(MM, SPMCP_fetch, MX_A) {
+  transition(MM, SPMCP_fetch, MM) {
     spm_allocateTBE;
-    spm_issuePUTM;
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
     k_popL0RequestQueue;
   }
 
-  transition(SX_L0, L0_Ack, SX_A) {
-    spm_issuePUTS;
+  transition(SX_L0, L0_Ack, SS) {
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
     k_popL0RequestQueue;
+    kd_wakeUpDependents;
   }
 
-  transition(EX_L0, L0_Ack, EX_A) {
-    spm_issuePUTE;
+  transition(EX_L0, L0_Ack, EE) {
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
     k_popL0RequestQueue;
+    kd_wakeUpDependents;
   }
 
-  transition(MX_L0, {L0_DataAck, L0_DataCopy}, MX_A) {
+  // After the L0 recall, the freshest data has settled into this L1 and can be
+  // copied into the SPM slot without releasing the coherent source line.
+  transition(MX_L0, {L0_DataAck, L0_DataCopy}, MM) {
     u_writeDataFromL0Response;
-    spm_issuePUTM;
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
     k_popL0RequestQueue;
+    kd_wakeUpDependents;
   }
 
-  transition(MX_L0, L0_DataNak, MX_A) {
-    spm_issuePUTM;
+  transition(MX_L0, L0_DataNak, MM) {
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
     k_popL0RequestQueue;
+    kd_wakeUpDependents;
   }
 
   transition(IX_D, {Data_all_Acks, Data_Exclusive, DataS_fromL1}, X) {
@@ -1638,7 +1733,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     z2_stallAndWaitL2Queue;
   }
 
-  transition({S_IL0, M_IL0, E_IL0, MM_IL0}, {Inv, Fwd_GETX, Fwd_GETS}) {
+  transition({S_IL0, M_IL0, E_IL0, MM_IL0}, {Inv, Fwd_GETX, Fwd_GETS, Fwd_GETS_Silent}) {
     z2_stallAndWaitL2Queue;
   }
 

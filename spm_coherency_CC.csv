@@ -1,70 +1,32 @@
-Column 1,Load,SPMCP_fetch (coherent),SPMCP_install (SPM),SPMWB_store,Store,SPMWB_read (SPM),SPM_release,SPMLD (SPM),SPMST (SPM),SPMWB_Ack,Replacement,Fwd-GetS,Fwd-GetM,Inv,Put-Ack,"Exclusive Data 
-from Dir","Data from Dir
-(ack=0)","Data from Dir 
-(ack>0)","Data from 
-Owner",Inv-Ack,Last-Inv-Ack
-I,Sent GetS to Dir/IS^D,"Send GetS_Silent to Dir
-/IX^D",,Return zero,"Send GetM to Dir
-/IM^AD",Return zero,,Return zero,Ignore,,,,,,,,,,,,
-IS^D,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,,,Stall,,-/E,-/S,,-/S,,
-IM^AD,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,Stall,Stall,,,,-/M,-/IM^A,-/M,ack--,
-IM^A,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,Stall,Stall,,,,,,,ack--,-/M
-S,Hit,"Hit, send PutS/SX^A","Migrate data to 
-available non-SPM way when 
-available/S",Return zero,"Send GetM to Dir
-/SM^AD",Return zero,,Return zero,Ignore,,"Send PutS to Dir
-/SI^A
-",,,"Send Inv-Ack to Req
-/I",,,,,,,
-SX^A,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,"Send data to Req and Dir
-/SX^A","Send data to Req
-/IX^A","Send Inv-Ack to Req
-/SX^A","Install SPM data after PutS ack
-/X",,,,,,
-SM^AD,Hit,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,Stall,Stall,"Send Inv-Ack to Req
-/IM^AD",,,-/M,-/SM^A,,ack--,
-SM^A,Hit,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,Stall,Stall,,,,,,,ack--,-/M
-M,Hit,"Hit, send PutM/MX^A","Migrate data to 
-available non-SPM way when 
-available/M",Return zero,Hit,Return zero,,Return zero,Ignore,,"Send PutM+data to Dir
-/MI^A
-","Send data to Req and Dir
-/S","Send data to Req
-/I",,,,,,,,
-MX^A,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,"Send data to Req and Dir
-/SX^A","Send data to Req
-/IX^A",,"Install SPM data after PutM ack
-/X",,,,,,
-E,Hit,"Hit, send PutE/EX^A","Migrate data to 
-available non-SPM way when 
-available/E",Return zero,Hit/M,Return zero,,Return zero,Ignore,,"Send PutE to Dir
-/EI^A
-","Send data to Req and Dir
-/S","Send data to Req
-/I",,,,,,,,
-EX^A,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,"Send data to Req and Dir
-/SX^A","Send data to Req
-/IX^A",,"Install SPM data after PutE ack
-/X",,,,,,
-MI^A,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,"Send data to Req and Dir
-/SI^A","Send data to Req
-/II^A",,-/I,,,,,,
-EI^A,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,"Send data to Req and Dir
-/SI^A","Send data to Req
-/II^A",,-/I,,,,,,
-SI^A,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,,,"Send Inv-Ack to Req
-/II^A",-/I,,,,,,
-II^A,Stall,Stall,Stall,Return zero,Stall,Return zero,,Return zero,Ignore,,Stall,,,,-/I,,,,,,
-IX^D,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,,,,,Route to SPM/X,Route to SPM/X,,Route to SPM/X,,
-X,,,,"Send SPMWBReq(addr, SPM_data) to Dir 
-/ XWB",,Return SPM data/X,"Drop SPM data, clear 
-scratchpad bit / I",Return SPM data/X,Update SPM Data/X,,,,,,,,,,,,
-XWB,,,,Stall,,Stall,Stall,Stall,Stall, - / X,,,,,,,,,,,
-,,,,,,,,,,,,,,,,,,,,,
-,,,,,,,,,,,,,,,,,,,,,
-,,,,,,,,,,,,,,,,,,,,,
-,,,,,,,,,,,,,,,,,,,,,
-,,,,,,,,,,,,,,,,,,,,,
-X,SPM State,,,,,,,,,,,,,,,,,,,,
-,,,,,,,,,,,,,,,,,,,,,
-IX^D,"Keeps cache line invalid in coherence domain, but still sends fetch and routes data to SPM",,,,,,,,,,,,,,,,,,,,
+State,Load,SPMCP_fetch,SPMCP_install,SPMWB_store,Store,SPMWB_read,SPM_release,SPMLD,SPMST,SPMWB_Ack,Replacement,Fwd-GetS,Fwd-GetS_Silent,Fwd-GetM,Inv,Put-Ack,Exclusive Data from Dir,Data from Dir (ack=0),Data from Dir (ack>0),Data from Owner,Inv-Ack,Last-Inv-Ack,L0 recall resp
+I,Send GetS to Dir /IS^D,"Alloc TBE, send GetS_Silent to Dir /IX^D","Claim SPM slot, ack L0 /X",Ack L0,Send GetM to Dir /IM^AD,Return zero to L0,Ack L0,Return zero to L0,Ack L0,,,,,,,,,,,,,,
+IS^D,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,,,,Stall,,-/E,-/S,,-/S,,,
+IM^AD,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,,,,-/M,-/IM^A,-/M,ack--,,
+IM^A,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,,,,,,,ack--,-/M,
+S,Hit,Recall L0 copy /SX^L0 then send PutS to Dir /SX^A (SS: send PutS directly /SX^A),"Claim SPM slot, ack L0 /X",Ack L0,Send GetM to Dir /SM^AD,Return zero to L0,Ack L0,Return zero to L0,Ack L0,,Send PutS to Dir /SI^A,,,,Send Inv-Ack to Req /I,,,,,,,,
+SX^L0,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,Stall,Stall,Stall,,,,,,,,On L0_Ack: send PutS to Dir /SX^A
+SX^A,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,Stall,"Install SPM data from cache, ack L0 /X",,,,,,,
+SM^AD,Hit,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,Send Inv-Ack to Req /IM^AD,,,-/M,-/SM^A,,ack--,,
+SM^A,Hit,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,,Stall,,,,,,,ack--,-/M,
+M,Hit,Recall L0 dirty data /MX^L0 then send PutM+data to Dir /MX^A (MM: send PutM+data directly /MX^A),"Claim SPM slot, ack L0 /X",Ack L0,Hit,Return zero to L0,Ack L0,Return zero to L0,Ack L0,,Send PutM+data to Dir /MI^A,Send data to Req and Dir /S,,Send data to Req /I,,,,,,,,,
+MX^L0,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,Stall,Stall,Stall,,,,,,,,On L0_DataAck/Copy: write back L0 dirty data + send PutM+data /MX^A; on L0_DataNak: send PutM+data /MX^A
+MX^A,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,"Send data to Req and Dir, downgrade /SX^A","Send silent data copy to Req, Unblock L2 (stay)",Stall,Stall,"Install SPM data from cache, ack L0 /X",,,,,,,
+E,Hit,Recall L0 copy /EX^L0 then send PutE to Dir /EX^A (EE: send PutE directly /EX^A),"Claim SPM slot, ack L0 /X",Ack L0,Hit /M,Return zero to L0,Ack L0,Return zero to L0,Ack L0,,Send PutE to Dir /EI^A,Send data to Req and Dir /S,,Send data to Req /I,,,,,,,,,
+EX^L0,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,Stall,Stall,Stall,,,,,,,,On L0_Ack: send PutE to Dir /EX^A
+EX^A,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,"Send data to Req and Dir, downgrade /SX^A","Send silent data copy to Req, Unblock L2 (stay)",Stall,Stall,"Install SPM data from cache, ack L0 /X",,,,,,,
+MI^A,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Send data to Req and Dir /SI^A,,Send data to Req /II^A,,-/I,,,,,,,
+EI^A,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Send data to Req and Dir /SI^A,,Send data to Req /II^A,,-/I,,,,,,,
+SI^A,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,,,,Send Inv-Ack to Req /II^A,-/I,,,,,,,
+II^A,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,,,,,-/I,,,,,,,
+IX^D,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,Stall,,Stall,Stall,Stall,Stall,Stall,,"Buffer data, install to SPM, ack L0 /X","Buffer data, install to SPM, ack L0 /X",,"Buffer data, install to SPM, ack L0 /X",,,
+X,,,,Send SPMWB_Req(addr+data) to Dir /XWB,,Return SPM data to L0 /X,"Drop SPM data, clear scratchpad bit, ack L0 /I",Return SPM data to L0 /X,"Update SPM data, ack L0 /X",,Stall,Stall,,Stall,Stall,,,,,,,,
+XWB,Stall,,,Stall,Stall,Stall,Stall,Stall,Stall,Ack L0 /X,Stall,Stall,Stall,Stall,Stall,,,,,,,,
+
+Legend (textbook notation; SLICC source MESI_Three_Level_SPM-L1cache.sm)
+X,"Live private-L1 scratchpad slot, outside the coherence domain"
+SX^L0/EX^L0/MX^L0,Recalling the inclusive L0 copy before relinquishing the coherent line (forward_eviction_to_L0_own); PUT issued on L0 response
+SX^A/EX^A/MX^A,"Sent PutS/PutE/PutM for own SPMCP_fetch; waiting for Put-Ack, then install from cache /X"
+IX^D,"SPMCP_fetch with no local copy; issued silent GetS, routes data straight to SPM and keeps the line invalid in the coherence domain"
+XWB,SPM writeback (SPMWB_Req) outstanding to the directory
+Fwd-GetS_Silent,"Snapshot read for another core's SPMCP_fetch; served by MM/EE/MX^A/EX^A (data + Unblock, state unchanged), stalled while the freshest data has not settled (SX^L0/EX^L0/MX^L0/IX^D/XWB)"
+Note,MX^A/EX^A serve a normal Fwd-GetS by handing data to the requester + L2 and downgrading to SX^A; Fwd-GetM/Inv still stall until this core's own PUT drains to X

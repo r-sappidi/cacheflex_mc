@@ -42,6 +42,7 @@
 #include "arch/arm/insts/static_inst.hh"
 #include "arch/arm/pcstate.hh"
 #include "cpu/thread_context.hh"
+#include "mem/request.hh"
 
 namespace gem5
 {
@@ -148,7 +149,7 @@ class Memory64 : public MightBeMicro64
 
     void startDisassembly(std::ostream &os) const;
 
-    unsigned memAccessFlags;
+    Request::FlagsType memAccessFlags;
 
     void setExcAcRel(bool exclusive, bool acrel);
 };

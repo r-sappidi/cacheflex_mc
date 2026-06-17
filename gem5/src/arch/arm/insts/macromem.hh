@@ -45,6 +45,7 @@
 #include "arch/arm/pcstate.hh"
 #include "arch/arm/tlb.hh"
 #include "cpu/thread_context.hh"
+#include "mem/request.hh"
 
 namespace gem5
 {
@@ -148,7 +149,7 @@ class MicroNeonMemOp : public MicroOp
   protected:
     RegIndex dest, ura;
     uint32_t imm;
-    unsigned memAccessFlags;
+    Request::FlagsType memAccessFlags;
 
     MicroNeonMemOp(const char *mnem, ExtMachInst machInst, OpClass __opClass,
                    RegIndex _dest, RegIndex _ura, uint32_t _imm)
@@ -422,7 +423,7 @@ class MicroMemOp : public MicroIntImmOp
 {
   protected:
     bool up;
-    unsigned memAccessFlags;
+    Request::FlagsType memAccessFlags;
 
     MicroMemOp(const char *mnem, ExtMachInst machInst, OpClass __opClass,
                RegIndex _ura, RegIndex _urb, bool _up, uint8_t _imm)
@@ -441,7 +442,7 @@ class MicroMemPairOp : public MicroOp
     RegIndex dest, dest2, urb;
     bool up;
     int32_t imm;
-    unsigned memAccessFlags;
+    Request::FlagsType memAccessFlags;
 
     MicroMemPairOp(const char *mnem, ExtMachInst machInst, OpClass __opClass,
             RegIndex _dreg1, RegIndex _dreg2, RegIndex _base,

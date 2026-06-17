@@ -103,6 +103,7 @@ let {{
 
             if self.flavor == "SPMLD":
                 self.memFlags.append("Request::SPMLD")
+                self.memFlags.append("Request::PHYSICAL")
 
             # Using a different execute template for fp flavoured loads.
             # In this specific template the memacc_code is executed

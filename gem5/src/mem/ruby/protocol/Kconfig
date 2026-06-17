@@ -34,9 +34,6 @@ config RUBY_PROTOCOL_MOESI_AMD_Base
 config RUBY_PROTOCOL_MESI_Two_Level
     bool "MESI two level"
     default n
-config RUBY_PROTOCOL_MESI_Two_Level_SPM
-    bool "MESI two level with CacheFlex SPM scaffolding"
-    default n
 config RUBY_PROTOCOL_MESI_Three_Level
     bool "MESI three level"
     default n

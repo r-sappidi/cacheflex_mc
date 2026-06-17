@@ -75,6 +75,7 @@ CacheMemory::CacheMemory(const Params &p)
 {
     m_cache_size = p.size;
     m_cache_assoc = p.assoc;
+    m_num_spm_ways = p.num_spm_ways;
     m_replacementPolicy_ptr = p.replacement_policy;
     m_start_index_bit = p.start_index_bit;
     m_is_instruction_only_cache = p.is_icache;
@@ -103,6 +104,9 @@ void
 CacheMemory::init()
 {
     assert(m_block_size != 0);
+    panic_if(m_num_spm_ways < 0 || m_num_spm_ways >= m_cache_assoc,
+             "num_spm_ways %d must be in [0, assoc=%d) to leave at least one "
+             "coherent way", m_num_spm_ways, m_cache_assoc);
     m_cache_num_sets = (m_cache_size / m_cache_assoc) / m_block_size;
     assert(m_cache_num_sets > 1);
     m_cache_num_set_bits = floorLog2(m_cache_num_sets);
@@ -272,7 +276,9 @@ CacheMemory::cacheAvail(Addr address) const
 
     int64_t cacheSet = addressToCacheSet(address);
 
-    for (int i = 0; i < m_cache_assoc; i++) {
+    // Reserved SPM ways [0, m_num_spm_ways) are never available to coherent
+    // data; start the search at the first coherent way.
+    for (int i = m_num_spm_ways; i < m_cache_assoc; i++) {
         AbstractCacheEntry* entry = m_cache[cacheSet][i];
         if (entry != NULL) {
             if (entry->isScratchpad()) {
@@ -307,7 +313,9 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
     // Find the first open slot
     int64_t cacheSet = addressToCacheSet(address);
     std::vector<AbstractCacheEntry*> &set = m_cache[cacheSet];
-    for (int i = 0; i < m_cache_assoc; i++) {
+    // Skip reserved SPM ways [0, m_num_spm_ways); coherent fills only the
+    // remaining ways.
+    for (int i = m_num_spm_ways; i < m_cache_assoc; i++) {
         if (set[i] && set[i]->isScratchpad()) {
             continue;
         }
@@ -474,7 +482,9 @@ CacheMemory::cacheProbe(Addr address) const
 
     int64_t cacheSet = addressToCacheSet(address);
     std::vector<ReplaceableEntry*> candidates;
-    for (int i = 0; i < m_cache_assoc; i++) {
+    // Only coherent ways [m_num_spm_ways, assoc) are replacement candidates;
+    // reserved SPM ways are skipped (and may be null before being claimed).
+    for (int i = m_num_spm_ways; i < m_cache_assoc; i++) {
         if (m_cache[cacheSet][i]->isScratchpad()) {
             continue;
         }

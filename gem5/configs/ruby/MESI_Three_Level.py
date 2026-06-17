@@ -69,6 +69,12 @@ def define_options(parser):
     parser.add_argument("--l0d_size", type=str, default="4096B")
     parser.add_argument("--l0i_assoc", type=int, default=1)
     parser.add_argument("--l0d_assoc", type=int, default=1)
+    parser.add_argument(
+        "--l1d_num_spm_ways",
+        type=int,
+        default=0,
+        help="number of private-L1 ways reserved for SPM (0 = no reservation)",
+    )
     parser.add_argument("--l0_transitions_per_cycle", type=int, default=32)
     parser.add_argument("--l1_transitions_per_cycle", type=int, default=32)
     parser.add_argument("--l2_transitions_per_cycle", type=int, default=4)
@@ -177,7 +183,13 @@ def create_system(
                 assoc=options.l1d_assoc,
                 start_index_bit=block_size_bits,
                 is_icache=False,
+                num_spm_ways=options.l1d_num_spm_ways,
             )
+            # Reserving SPM ways leaves the coherent ways as a non-power-of-2
+            # subset; TreePLRU's tree indexing assumes the full associativity,
+            # so use LRU (which scans the candidate list) when reserving.
+            if options.l1d_num_spm_ways > 0:
+                l1_cache.replacement_policy = LRURP()
 
             l1_cntrl = MESI_Three_Level_L1Cache_Controller(
                 version=i * num_cpus_per_cluster + j,
@@ -211,6 +223,8 @@ def create_system(
             l1_cntrl.bufferFromL0 = l0_cntrl.bufferToL1
             l0_cntrl.bufferFromL1 = MessageBuffer(ordered=True)
             l1_cntrl.bufferToL0 = l0_cntrl.bufferFromL1
+            l0_cntrl.spmBufferFromL1 = MessageBuffer(ordered=True)
+            l1_cntrl.spmBufferToL0 = l0_cntrl.spmBufferFromL1
 
             # Connect the L1 controllers and the network
             l1_cntrl.requestToL2 = MessageBuffer()

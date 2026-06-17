@@ -338,6 +338,11 @@ MMU::translateSe(const RequestPtr &req, ThreadContext *tc, Mode mode,
     bool is_fetch = (mode == Execute);
     bool is_write = (mode == Write);
 
+    if (flags.isSet(Request::PHYSICAL)) {
+        req->setPaddr(vaddr);
+        return finalizePhysical(req, tc, mode);
+    }
+
     if (!is_fetch) {
         if (state.sctlr.a || !(flags & AllowUnaligned)) {
             if (vaddr & mask(flags & AlignmentMask)) {

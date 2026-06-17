@@ -158,6 +158,7 @@ class CacheMemory : public SimObject
   public:
     int getCacheSize() const { return m_cache_size; }
     int getCacheAssoc() const { return m_cache_assoc; }
+    int getNumSPMWays() const { return m_num_spm_ways; }
     int getNumBlocks() const { return m_cache_num_sets * m_cache_assoc; }
     Addr getAddressAtIdx(int idx) const;
 
@@ -202,6 +203,9 @@ class CacheMemory : public SimObject
     int m_cache_num_sets;
     int m_cache_num_set_bits;
     int m_cache_assoc;
+    // Low ways [0, m_num_spm_ways) are reserved for SPM lines; coherent data
+    // is confined to ways [m_num_spm_ways, m_cache_assoc). 0 = no reservation.
+    int m_num_spm_ways;
     int m_start_index_bit;
     bool m_resource_stalls;
     int m_block_size;

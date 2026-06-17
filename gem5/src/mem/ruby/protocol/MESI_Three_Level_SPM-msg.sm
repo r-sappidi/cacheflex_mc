@@ -38,6 +38,108 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+// CoherenceRequestType
+enumeration(CoherenceRequestType, desc="...") {
+  GETX,      desc="Get eXclusive";
+  UPGRADE,   desc="UPGRADE to exclusive";
+  GETS,      desc="Get Shared";
+  GET_INSTR, desc="Get Instruction";
+  INV,       desc="INValidate";
+  PUTX,      desc="Replacement message";
+
+  WB_ACK,    desc="Writeback ack";
+
+  DMA_READ, desc="DMA Read";
+  DMA_WRITE, desc="DMA Write";
+
+  FLUSH, desc="Flush request";
+  FLUSH_NP, desc="Flush request (not present in L1 and L0)";
+  FLUSH_DATA, desc="Get data for flush request";
+
+  GETS_SILENT, desc="Get data without adding this cache as a sharer";
+  PUTS,        desc="Release shared coherent source for SPM copy";
+  PUTM,        desc="Release modified coherent source with data for SPM copy";
+  PUTE,        desc="Release exclusive coherent source for SPM copy";
+  SPMWB_REQ,   desc="SPM writeback request";
+}
+
+// CoherenceResponseType
+enumeration(CoherenceResponseType, desc="...") {
+  MEMORY_ACK, desc="Ack from memory controller";
+  DATA, desc="Data block for L1 cache in S state";
+  DATA_EXCLUSIVE, desc="Data block for L1 cache in M/E state";
+  MEMORY_DATA, desc="Data block from / to main memory";
+  ACK, desc="Generic invalidate ack";
+  WB_ACK, desc="writeback ack";
+  UNBLOCK, desc="unblock";
+  EXCLUSIVE_UNBLOCK, desc="exclusive unblock";
+  INV, desc="Invalidate from directory";
+
+  FLUSH_ACK, desc="Flush ack";
+
+  PUT_ACK, desc="Ack for SPM source release";
+  SPMWB_ACK, desc="SPM writeback ack";
+}
+
+// RequestMsg
+structure(RequestMsg, desc="...", interface="Message") {
+  Addr addr,              desc="Physical address for this request";
+  Addr SrcAddr, default="0", desc="Coherent source address for SPM copy";
+  Addr DstSPMAddr, default="0", desc="SPM destination slot address";
+  CoherenceRequestType Type,    desc="Type of request (GetS, GetX, PutX, etc)";
+  RubyAccessMode AccessMode,    desc="user/supervisor access type";
+  MachineID Requestor      ,    desc="What component request";
+  NetDest Destination,          desc="What components receive the request, includes MachineType and num";
+  MessageSizeType MessageSize,  desc="size category of the message";
+  DataBlock DataBlk,            desc="Data for the cache line (if PUTX)";
+  int Len;
+  bool Dirty, default="false",  desc="Dirty bit";
+  PrefetchBit Prefetch,         desc="Is this a prefetch request";
+
+  bool functionalRead(Packet *pkt) {
+    if (Type == CoherenceRequestType:PUTX ||
+        Type == CoherenceRequestType:PUTM ||
+        Type == CoherenceRequestType:SPMWB_REQ) {
+        return testAndRead(addr, DataBlk, pkt);
+    }
+
+    return false;
+  }
+
+  bool functionalWrite(Packet *pkt) {
+    return testAndWrite(addr, DataBlk, pkt);
+  }
+}
+
+// ResponseMsg
+structure(ResponseMsg, desc="...", interface="Message") {
+  Addr addr,              desc="Physical address for this request";
+  Addr SrcAddr, default="0", desc="Coherent source address for SPM copy";
+  Addr DstSPMAddr, default="0", desc="SPM destination slot address";
+  CoherenceResponseType Type,   desc="Type of response (Ack, Data, etc)";
+  MachineID Sender,             desc="What component sent the data";
+  NetDest Destination,          desc="Node to whom the data is sent";
+  DataBlock DataBlk,            desc="Data for the cache line";
+  bool Dirty, default="false",  desc="Dirty bit";
+  int AckCount, default="0",  desc="number of acks in this message";
+  MessageSizeType MessageSize,  desc="size category of the message";
+
+  bool functionalRead(Packet *pkt) {
+    if (Type == CoherenceResponseType:DATA ||
+        Type == CoherenceResponseType:DATA_EXCLUSIVE ||
+        Type == CoherenceResponseType:MEMORY_DATA) {
+
+        return testAndRead(addr, DataBlk, pkt);
+    }
+
+    return false;
+  }
+
+  bool functionalWrite(Packet *pkt) {
+    return testAndWrite(addr, DataBlk, pkt);
+  }
+}
+
 // Various class of messages that can be exchanged between the L0 and the L1
 // controllers.
 enumeration(CoherenceClass, desc="...") {

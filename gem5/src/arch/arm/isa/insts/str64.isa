@@ -89,6 +89,7 @@ let {{
 
             if self.flavor == "SPMST":
                 self.memFlags.append("Request::SPMST")
+                self.memFlags.append("Request::PHYSICAL")
             elif self.flavor == "SPMCP":
                 self.memFlags.append("Request::SPMCP_FETCH")
             elif self.flavor == "SPMWB":

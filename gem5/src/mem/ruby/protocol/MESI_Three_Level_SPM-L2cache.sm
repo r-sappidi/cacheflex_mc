@@ -95,6 +95,8 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     MT_IB, AccessPermission:Busy, desc="Blocked for L1_GETS from MT, got unblock, waiting for data";
     MT_SB, AccessPermission:Busy, desc="Blocked for L1_GETS from MT, got data,  waiting for unblock";
 
+    MT_SPMS, AccessPermission:Busy, desc="MT: forwarded silent SPM GETS to owner, awaiting owner completion; owner keeps the line and the requester is not added as a sharer";
+
     I_F, AccessPermission:Busy, desc="Flushing from NP,SS,M state, waiting for memory ack/sharers ack";
     I_FF, AccessPermission:Busy, desc="Flushing from SS state, waiting for sharers acks and memory ack";
     MT_F, AccessPermission:Busy, desc="Flushing from MT state, waiting for data from owner";
@@ -498,13 +500,14 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     }
   }
 
-  action(sb_forwardSilentGetSToExclusive, "sb", desc="forward SPM GETS_SILENT as normal GETS to exclusive L1 owner") {
+  action(sb_forwardSilentGetSToExclusive, "sb", desc="forward SPM GETS_SILENT to the exclusive L1 owner as a silent snapshot request") {
     peek(L1RequestL2Network_in, RequestMsg) {
       enqueue(L1RequestL2Network_out, RequestMsg, to_l1_latency) {
         assert(is_valid(cache_entry));
         out_msg.addr := address;
-        out_msg.Type := CoherenceRequestType:GETS;
+        out_msg.Type := CoherenceRequestType:GETS_SILENT;
         out_msg.Requestor := in_msg.Requestor;
+        out_msg.DstSPMAddr := in_msg.DstSPMAddr;
         out_msg.Destination.add(cache_entry.Exclusive);
         out_msg.MessageSize := MessageSizeType:Request_Control;
       }
@@ -1078,11 +1081,11 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     jj_popL1RequestQueue;
   }
 
-  transition({IM, IS, ISS, SPM_IS, SPM_WB, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, {L2_Replacement, L2_Replacement_clean, Flush, Flush_Data, Flush_NP, Flush_Clean, Flush_NP_Clean, Flush_Data_Clean}) {
+  transition({IM, IS, ISS, SPM_IS, SPM_WB, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS}, {L2_Replacement, L2_Replacement_clean, Flush, Flush_Data, Flush_NP, Flush_Clean, Flush_NP_Clean, Flush_Data_Clean}) {
     zz_stallAndWaitL1RequestQueue;
   }
 
-  transition({IM, IS, ISS, SPM_IS, SPM_WB, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, MEM_Inv) {
+  transition({IM, IS, ISS, SPM_IS, SPM_WB, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS}, MEM_Inv) {
     zn_recycleResponseNetwork;
   }
 
@@ -1091,8 +1094,16 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   }
 
 
-  transition({SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, {L1_GETS, L1_GET_INSTR, L1_GETX, L1_UPGRADE, SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE, SPMWB_REQ}) {
+  transition({SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS}, {L1_GETS, L1_GET_INSTR, L1_GETX, L1_UPGRADE, SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE, SPMWB_REQ}) {
     zz_stallAndWaitL1RequestQueue;
+  }
+
+  // The owner signals completion of a silent SPM snapshot with an Unblock;
+  // the requester took its copy into a non-coherent SPM slot, so it is not
+  // added as a sharer and the line stays Modified in the owner (MT).
+  transition(MT_SPMS, Unblock, MT) {
+    k_popUnblockQueue;
+    kd_wakeUpDependents;
   }
 
   transition({I_F, MT_F, I_FF}, {L1_GETS, L1_GET_INSTR, L1_GETX, L1_UPGRADE, L1_PUTX, L1_PUTX_old, SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE, SPMWB_REQ, L2_Replacement, L2_Replacement_clean, WB_Data, WB_Data_clean, MEM_Inv, Unblock, Exclusive_Unblock}) {
@@ -1141,9 +1152,14 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     jj_popL1RequestQueue;
   }
 
-  transition(SPM_IS, Mem_Data, M) {
-    m_writeDataToCache;
+  // A silent SPM fetch must not leave a coherent copy behind: the line was
+  // moved into the requester's SPM (outside coherence) and the directory was
+  // never told L2 owns it. Send the snapshot straight from the memory response
+  // and drop the L2 block (-> NP) so L2 and the directory stay consistent and
+  // no untracked line can later trigger a spurious CleanReplacement.
+  transition(SPM_IS, Mem_Data, NP) {
     sdm_sendSPMDataFromMemory;
+    rr_deallocateL2CacheBlock;
     s_deallocateTBE;
     o_popIncomingResponseQueue;
     kd_wakeUpDependents;
@@ -1331,7 +1347,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     jj_popL1RequestQueue;
   }
 
-  transition(MT, SPM_GETS_SILENT, MT_IIB) {
+  transition(MT, SPM_GETS_SILENT, MT_SPMS) {
     sb_forwardSilentGetSToExclusive;
     uu_profileMiss;
     set_setMRU;

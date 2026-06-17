@@ -543,10 +543,10 @@ SPAlignmentCheckEnabled(ThreadContext *tc)
     }
 }
 
-unsigned
-addrAlignmentFlags(int memsize, unsigned memAccessFlags)
+Request::FlagsType
+addrAlignmentFlags(int memsize, Request::FlagsType memAccessFlags)
 {
-    unsigned flags = memAccessFlags & (~(unsigned)MMU::AlignmentMask);
+    Request::FlagsType flags = memAccessFlags & ~Request::FlagsType(MMU::AlignmentMask);
     switch (memsize) {
         case 1:
             flags = flags | MMU::AlignByte;

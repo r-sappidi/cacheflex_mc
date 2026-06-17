@@ -44,6 +44,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
    CacheMemory * Dcache;
    Cycles request_latency := 2;
    Cycles response_latency := 2;
+   Cycles spm_request_latency := 2;
    Cycles llsc_lock_timeout_latency := 16;
    bool use_llsc_lock := "True";
    bool send_evictions;
@@ -56,6 +57,9 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
 
    // To this node's L0 cache FROM the network
    MessageBuffer * bufferFromL1, network="From";
+
+   // Dedicated private-L1 SPM response path.
+   MessageBuffer * spmBufferFromL1, network="From";
 
    // Message queue between this controller and the processor
    MessageBuffer * mandatoryQueue;
@@ -533,6 +537,26 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
     }
   }
 
+  // Dedicated SPM responses from the private L1 SPM datapath.
+  in_port(spmMessageBuffer_in, CoherenceMsg, spmBufferFromL1, rank = 1) {
+    if (spmMessageBuffer_in.isReady(clockEdge())) {
+      peek(spmMessageBuffer_in, CoherenceMsg, block_on="addr") {
+        assert(in_msg.Dest == machineID);
+
+        Entry cache_entry := getCacheEntry(in_msg.addr);
+        TBE tbe := TBEs[in_msg.addr];
+
+        if (in_msg.Class == CoherenceClass:SPM_DATA) {
+          trigger(Event:SPM_Data, in_msg.addr, cache_entry, tbe);
+        } else if (in_msg.Class == CoherenceClass:SPM_ACK) {
+          trigger(Event:SPM_Ack, in_msg.addr, cache_entry, tbe);
+        } else {
+          error("Invalid SPM response type");
+        }
+      }
+    }
+  }
+
   // Mandatory Queue betweens Node's CPU and it's L0 caches
   in_port(mandatoryQueue_in, RubyRequest, mandatoryQueue, desc="...", rank = 0) {
     if (mandatoryQueue_in.isReady(clockEdge())) {
@@ -696,7 +720,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
 
   action(spm_issueRequestToL1, "spmreq", desc="Forward SPM request to private L1") {
     peek(mandatoryQueue_in, RubyRequest) {
-      enqueue(requestNetwork_out, CoherenceMsg, request_latency) {
+      enqueue(requestNetwork_out, CoherenceMsg, spm_request_latency) {
         out_msg.addr := address;
         if (in_msg.Type == RubyRequestType:SPMCP_fetch) {
           out_msg.Class := CoherenceClass:SPMCP_FETCH;
@@ -839,8 +863,22 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
     }
   }
 
+  action(spm_dedicatedReadCallback, "spdr", desc="Complete SPM read-like request from dedicated SPM path") {
+    peek(spmMessageBuffer_in, CoherenceMsg) {
+      DataBlock DataBlk := in_msg.DataBlk;
+      sequencer.readCallback(address, DataBlk);
+    }
+  }
+
   action(spm_writeCallback, "spwcb", desc="Complete SPM write-like request") {
     peek(messgeBuffer_in, CoherenceMsg) {
+      DataBlock DataBlk := in_msg.DataBlk;
+      sequencer.writeCallback(address, DataBlk);
+    }
+  }
+
+  action(spm_dedicatedWriteCallback, "spdw", desc="Complete SPM write-like request from dedicated SPM path") {
+    peek(spmMessageBuffer_in, CoherenceMsg) {
       DataBlock DataBlk := in_msg.DataBlk;
       sequencer.writeCallback(address, DataBlk);
     }
@@ -919,6 +957,12 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
          desc="Pop incoming request queue and profile the delay within this virtual network") {
     Tick delay := messgeBuffer_in.dequeue(clockEdge());
     profileMsgDelay(2, ticksToCycles(delay));
+  }
+
+  action(spm_popResponseQueue, "spop",
+         desc="Pop dedicated SPM response queue and profile the delay") {
+    Tick delay := spmMessageBuffer_in.dequeue(clockEdge());
+    profileMsgDelay(1, ticksToCycles(delay));
   }
 
   action(o_popIncomingResponseQueue, "o",
@@ -1487,13 +1531,13 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   }
 
   transition({I, S, E, M, LLSC_E, LLSC_M}, SPM_Data) {
-    spm_readCallback;
-    l_popRequestQueue;
+    spm_dedicatedReadCallback;
+    spm_popResponseQueue;
   }
 
   transition({I, S, E, M, LLSC_E, LLSC_M}, SPM_Ack) {
-    spm_writeCallback;
-    l_popRequestQueue;
+    spm_dedicatedWriteCallback;
+    spm_popResponseQueue;
   }
 
   transition({LLSC_E, LLSC_M}, Ifetch) {

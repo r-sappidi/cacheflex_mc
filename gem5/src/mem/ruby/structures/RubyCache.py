@@ -40,6 +40,12 @@ class RubyCache(SimObject):
     replacement_policy = Param.BaseReplacementPolicy(TreePLRURP(), "")
     start_index_bit = Param.Int(6, "index start, default 6 for 64-byte line")
     is_icache = Param.Bool(False, "is instruction only cache")
+    num_spm_ways = Param.Int(
+        0,
+        "number of low ways [0, num_spm_ways) statically reserved for SPM; "
+        "coherent data is confined to the remaining ways. 0 disables "
+        "reservation (dynamic SPM claim with migration).",
+    )
     block_size = Param.MemorySize(
         "0B", "block size in bytes. 0 means default RubyBlockSize"
     )

@@ -50,6 +50,7 @@
 #include "base/trace.hh"
 #include "base/types.hh"
 #include "cpu/static_inst.hh"
+#include "mem/request.hh"
 #include "cpu/thread_context.hh"
 #include "enums/ArmExtension.hh"
 
@@ -269,7 +270,7 @@ mcrrMrrcIssBuild(bool isRead, uint32_t crm, RegIndex rt, RegIndex rt2,
 
 bool SPAlignmentCheckEnabled(ThreadContext *tc);
 
-unsigned addrAlignmentFlags(int memsize, unsigned memAccessFlags);
+Request::FlagsType addrAlignmentFlags(int memsize, Request::FlagsType memAccessFlags);
 
 Addr truncPage(Addr addr);
 Addr roundPage(Addr addr);
