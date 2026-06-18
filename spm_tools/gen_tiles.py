@@ -3,7 +3,8 @@
 so tile size can be swept. Emits a complete .cpp per (variant, mr, nB):
 
     variant = "spm"  -> B sourced via spm.ld1w (CacheFlex scratchpad)
-    variant = "blk"  -> B sourced via coherent ld1w
+    variant = "blk"  -> B packed into a contiguous per-thread panel, then
+                        sourced via coherent ld1w
 
 Register map (VL=16, one vector = 64 fp32, nc = nB*64 columns):
     C accumulators z[0 .. mr*nB-1]     (row r, col-half c -> z[r*nB+c])
@@ -11,8 +12,8 @@ Register map (VL=16, one vector = 64 fp32, nc = nB*64 columns):
     A broadcasts   z[mr*nB+nB .. +mr-1]
 Requires mr*nB + nB + mr <= 32.
 
-Parallelization, staging, 2D PRxPC grid, and harness flags match
-gemm_spm_opt_mc2.cpp; only the microkernel tile shape changes.
+Parallelization, per-panel staging/packing, 2D PRxPC grid, and harness flags
+match gemm_spm_opt_mc2.cpp; only the microkernel tile shape changes.
 """
 import sys
 
@@ -126,11 +127,15 @@ def gen_cpp(variant, mr, nb):
                      f"static_cast<std::uint64_t>(opt.kc));")
         kern_tail_call = ("kern_tail(c0, a0, bpanel, ldb, "
                           "static_cast<std::uint64_t>(opt.kc));")
-        stage = ""
+        stage = """            float *pack = ensure_bpack(static_cast<std::size_t>(opt.kc) * kNc);
+            for (int p = 0; p < opt.kc; ++p) {
+                const float *src = B + static_cast<std::size_t>(pc + p) * N + jc;
+                std::copy(src, src + kNc, pack + static_cast<std::size_t>(p) * kNc);
+            }
+            const float *bpanel = pack;
+            const std::uint64_t ldb = static_cast<std::uint64_t>(kNc) * sizeof(float);"""
         bsetup = ""
-        bpanel = ("const float *bpanel = B + static_cast<std::size_t>(pc) * N + jc;\n"
-                  "            const std::uint64_t ldb = "
-                  "static_cast<std::uint64_t>(N) * sizeof(float);")
+        bpanel = ""
 
     spm_fields = ("    int spm_way0 = 0;\n    int spm_base_set = 0;\n"
                   if variant == "spm" else "")
@@ -141,12 +146,25 @@ def gen_cpp(variant, mr, nb):
                   'static inline void spmcp64(std::uint64_t d, const void *s) {\n'
                   '    asm volatile("SPMCP_64_IMM %0, [%1, #0]\\n" : : "r"(d), "r"(s) : "memory");\n'
                   '}\n' if variant == "spm" else "")
+    bpack_fn = ('''static float *ensure_bpack(std::size_t count) {
+    static thread_local float *buf = nullptr;
+    static thread_local std::size_t cap = 0;
+    if (cap < count) {
+        std::free(buf);
+        void *raw = nullptr;
+        if (posix_memalign(&raw, 64, count * sizeof(float)) != 0) std::exit(1);
+        buf = static_cast<float *>(raw);
+        cap = count;
+    }
+    return buf;
+}
+''' if variant == "blk" else "")
 
     return TEMPLATE.format(
         native=native, tag=tag, nc=nc, mr=mr, nb=nb, maxz=areg(mr - 1, mr, nb),
         full=full, tail=tail, kern_call=kern_call, kern_tail_call=kern_tail_call,
         stage=stage, bsetup=bsetup, bpanel=bpanel, spm_fields=spm_fields,
-        spm_parse=spm_parse, spm_dsb_fn=spm_dsb_fn,
+        spm_parse=spm_parse, spm_dsb_fn=spm_dsb_fn, bpack_fn=bpack_fn,
         cap_check=("    const long lines = static_cast<long>(opt.kc) * kVecsPerRow;\n"
                    "    if (opt.spm_way0 * 1024L + opt.spm_base_set + lines > 6 * 1024L) {\n"
                    '        std::fprintf(stderr, "panel exceeds SPM ways 0..5\\n"); std::exit(2);\n'
@@ -256,7 +274,7 @@ static void thread_tile(const Shared &sh, int tid, int *r0, int *r1, int *c0, in
     *c0 = p0 * kNc; *c1 = p1 * kNc;
 }}
 #if defined({native})
-{spm_dsb_fn}{full}
+{spm_dsb_fn}{bpack_fn}{full}
 {tail}
 #endif
 static void run_rows(const Shared &sh, int row0, int row1, int col0, int col1) {{
