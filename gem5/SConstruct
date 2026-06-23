@@ -594,6 +594,11 @@ for variant_path in variant_paths:
         # We always compile using C++17
         env.Append(CXXFLAGS=['-std=c++17'])
 
+        # GCC 8 exposes <filesystem> but still keeps the implementation in a
+        # separate compatibility library.
+        if env['GCC'] and compareVersions(env['CXXVERSION'], "9.0") < 0:
+            env.Append(LIBS=['stdc++fs'])
+
         if sys.platform.startswith('freebsd'):
             env.Append(CCFLAGS=['-I/usr/local/include'])
             env.Append(CXXFLAGS=['-I/usr/local/include'])

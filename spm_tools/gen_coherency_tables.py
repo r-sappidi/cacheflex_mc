@@ -26,8 +26,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # --------------------------------------------------------------------------
 CC_COLS = [
     "State", "Load", "SPMCP_fetch", "SPMCP_install", "SPMWB_store", "Store",
-    "SPMWB_read", "SPM_release", "SPMLD", "SPMST", "SPMWB_Ack", "Replacement",
-    "Fwd-GetS", "Fwd-GetS_Silent", "Fwd-GetM", "Inv", "Put-Ack",
+    "SPMWB_read", "SPM_release", "SPMLD", "SPMST", "SPMWB_Ack", "WB-Ack",
+    "Replacement", "Fwd-GetS", "Fwd-GetS_Silent", "Fwd-GetM", "Inv", "Put-Ack",
     "Exclusive Data from Dir", "Data from Dir (ack=0)", "Data from Dir (ack>0)",
     "Data from Owner", "Inv-Ack", "Last-Inv-Ack", "L0 recall resp",
 ]
@@ -135,6 +135,19 @@ cc("EX^A", **LOCAL_STALL,
       "Fwd-GetM": "Stall", "Inv": "Stall",
       "Put-Ack": "Install SPM data from cache, ack L0 /X"})
 
+cc("M_I", Load="Stall", Store="Stall", Replacement="Stall",
+   **{"Fwd-GetS": "Send data from writeback TBE to Req and Dir /SINK_WB_ACK",
+      "Fwd-GetS_Silent": "Send silent data from writeback TBE to Req, "
+                         "Unblock L2 /SINK_WB_ACK",
+      "Fwd-GetM": "Send data from writeback TBE to Req /SINK_WB_ACK",
+      "Inv": "Sink invalidate /SINK_WB_ACK",
+      "WB-Ack": "-/I"}, **SPM_STALL)
+
+cc("SINK_WB_ACK", Load="Stall", Store="Stall", Replacement="Stall",
+   **{"Fwd-GetS": "Stall", "Fwd-GetS_Silent": "Stall",
+      "Fwd-GetM": "Stall", "Inv": "Sink invalidate (stay)",
+      "WB-Ack": "-/I"}, **SPM_STALL)
+
 cc("MI^A", Load="Stall", Store="Stall", Replacement="Stall",
    **{"Fwd-GetS": "Send data to Req and Dir /SI^A",
       "Fwd-GetM": "Send data to Req /II^A", "Put-Ack": "-/I"}, **SPM_STALL)
@@ -179,8 +192,13 @@ CC_LEGEND = [
      "straight to SPM and keeps the line invalid in the coherence domain"],
     ["XWB", "SPM writeback (SPMWB_Req) outstanding to the directory"],
     ["Fwd-GetS_Silent", "Snapshot read for another core's SPMCP_fetch; served "
-     "by MM/EE/MX^A/EX^A (data + Unblock, state unchanged), stalled while the "
-     "freshest data has not settled (SX^L0/EX^L0/MX^L0/IX^D/XWB)"],
+     "by MM/EE/MX^A/EX^A (data + Unblock, state unchanged). M_I serves from "
+     "the writeback TBE and moves to SINK_WB_ACK. Requests stall while the "
+     "freshest data has not settled (SX^L0/EX^L0/MX^L0/IX^D/XWB/SINK_WB_ACK)"],
+    ["M_I", "Modified replacement/writeback transient. Cache entry may already "
+     "be deallocated, so forwarded data and silent snapshots are sourced from "
+     "the TBE, then the controller waits in SINK_WB_ACK for the outstanding "
+     "writeback acknowledgement"],
     ["Note", "MX^A/EX^A serve a normal Fwd-GetS by handing data to the "
      "requester + L2 and downgrading to SX^A; Fwd-GetM/Inv still stall until "
      "this core's own PUT drains to X"],

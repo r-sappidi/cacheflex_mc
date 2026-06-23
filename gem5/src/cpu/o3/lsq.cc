@@ -65,9 +65,62 @@ namespace gem5
 namespace o3
 {
 
+namespace
+{
+
+bool
+startsWith(const std::string &s, const char *prefix)
+{
+    return s.rfind(prefix, 0) == 0;
+}
+
+bool
+isSpmLoadInst(const DynInstPtr &inst)
+{
+    return inst->isSPMMem() && inst->isLoad();
+}
+
+bool
+isSpmStoreInst(const DynInstPtr &inst)
+{
+    return inst->isSPMMem() && inst->isStore() &&
+        (startsWith(inst->staticInst->getName(), "spm.st") ||
+         startsWith(inst->staticInst->getName(), "spmstr"));
+}
+
+bool
+isSpmBridgeInst(const DynInstPtr &inst)
+{
+    if (!inst->isSPMMem())
+        return false;
+
+    const std::string name = inst->staticInst->getName();
+    return startsWith(name, "spmcp") || startsWith(name, "spmwb");
+}
+
+bool
+isSpmOnlyInst(const DynInstPtr &inst)
+{
+    return isSpmLoadInst(inst) || isSpmStoreInst(inst);
+}
+
+bool
+requestUsesSpmLsq(LSQ::LSQRequest *request)
+{
+    const DynInstPtr &inst = request->instruction();
+    return isSpmOnlyInst(inst) ||
+        (request->mainReq()->isSPMLD() || request->mainReq()->isSPMST());
+}
+
+} // anonymous namespace
+
 LSQ::DcachePort::DcachePort(LSQ *_lsq, CPU *_cpu) :
     RequestPort(_cpu->name() + ".dcache_port"), lsq(_lsq), cpu(_cpu),
     dcachePortStats(_cpu)
+{}
+
+LSQ::SpmPort::SpmPort(LSQ *_lsq, CPU *_cpu) :
+    RequestPort(_cpu->name() + ".spm_port"), lsq(_lsq), cpu(_cpu)
 {}
 
 LSQ::DcachePort::DcachePortStats::DcachePortStats(CPU* _cpu)
@@ -113,6 +166,8 @@ LSQ::LSQ(CPU *cpu_ptr, IEW *iew_ptr, const BaseO3CPUParams &params)
       _cacheBlocked(false),
       cacheStorePorts(params.cacheStorePorts), usedStorePorts(0),
       cacheLoadPorts(params.cacheLoadPorts), usedLoadPorts(0),
+      spmStorePorts(params.spmStorePorts), usedSpmStorePorts(0),
+      spmLoadPorts(params.spmLoadPorts), usedSpmLoadPorts(0),
       waitingForStaleTranslation(false),
       staleTranslationWaitTxnId(0),
       lsqPolicy(params.smtLSQPolicy),
@@ -123,6 +178,7 @@ LSQ::LSQ(CPU *cpu_ptr, IEW *iew_ptr, const BaseO3CPUParams &params)
       maxSQEntries(maxLSQAllocation(lsqPolicy, SQEntries, params.numThreads,
                   params.smtLSQThreshold)),
       dcachePort(this, cpu_ptr),
+      spmPort(this, cpu_ptr),
       numThreads(params.numThreads),
       recvRespThrottling(params.recvRespThrottling),
       recvRespMaxCachelines(params.recvRespMaxCachelines),
@@ -160,10 +216,17 @@ LSQ::LSQ(CPU *cpu_ptr, IEW *iew_ptr, const BaseO3CPUParams &params)
     }
 
     thread.reserve(numThreads);
+    spmThread.reserve(numThreads);
+    spmBridgeInsts.resize(numThreads);
     for (ThreadID tid = 0; tid < numThreads; tid++) {
         thread.emplace_back(maxLQEntries, maxSQEntries);
         thread[tid].init(cpu, iew_ptr, params, this, tid);
         thread[tid].setDcachePort(&dcachePort);
+
+        spmThread.emplace_back(params.SPMLQEntries, params.SPMSQEntries);
+        spmThread[tid].isSpmLsq = true;
+        spmThread[tid].init(cpu, iew_ptr, params, this, tid);
+        spmThread[tid].setDcachePort(&spmPort);
     }
 }
 
@@ -186,8 +249,10 @@ LSQ::drainSanityCheck() const
 {
     assert(isDrained());
 
-    for (ThreadID tid = 0; tid < numThreads; tid++)
+    for (ThreadID tid = 0; tid < numThreads; tid++) {
         thread[tid].drainSanityCheck();
+        spmThread[tid].drainSanityCheck();
+    }
 }
 
 bool
@@ -205,6 +270,14 @@ LSQ::isDrained() const
         drained = false;
     }
 
+    for (ThreadID tid = 0; tid < numThreads; tid++) {
+        if (!spmThread[tid].lqEmpty() || !spmThread[tid].sqEmpty()) {
+            DPRINTF(Drain, "Not drained, SPM LSQ for thread %u not empty.\n",
+                    tid);
+            drained = false;
+        }
+    }
+
     return drained;
 }
 
@@ -212,10 +285,13 @@ void
 LSQ::takeOverFrom()
 {
     usedStorePorts = 0;
+    usedSpmLoadPorts = 0;
+    usedSpmStorePorts = 0;
     _cacheBlocked = false;
 
     for (ThreadID tid = 0; tid < numThreads; tid++) {
         thread[tid].takeOverFrom();
+        spmThread[tid].takeOverFrom();
     }
 }
 
@@ -228,6 +304,8 @@ LSQ::tick()
 
     usedLoadPorts = 0;
     usedStorePorts = 0;
+    usedSpmLoadPorts = 0;
+    usedSpmStorePorts = 0;
 }
 
 bool
@@ -265,12 +343,53 @@ LSQ::cachePortBusy(bool is_load)
     }
 }
 
+bool
+LSQ::spmPortAvailable(bool is_load) const
+{
+    return is_load ? usedSpmLoadPorts < spmLoadPorts :
+        usedSpmStorePorts < spmStorePorts;
+}
+
+void
+LSQ::spmPortBusy(bool is_load)
+{
+    assert(spmPortAvailable(is_load));
+    if (is_load) {
+        usedSpmLoadPorts++;
+    } else {
+        usedSpmStorePorts++;
+    }
+}
+
+bool
+LSQ::hasOlderSpmBridge(ThreadID tid, InstSeqNum seq_num) const
+{
+    const auto &bridges = spmBridgeInsts[tid];
+    return !bridges.empty() && bridges.front() < seq_num;
+}
+
+void
+LSQ::retireSpmBridge(ThreadID tid, InstSeqNum seq_num)
+{
+    auto &bridges = spmBridgeInsts[tid];
+    for (auto it = bridges.begin(); it != bridges.end(); ++it) {
+        if (*it == seq_num) {
+            bridges.erase(it);
+            return;
+        }
+    }
+}
+
 void
 LSQ::insertLoad(const DynInstPtr &load_inst)
 {
     ThreadID tid = load_inst->threadNumber;
 
-    thread[tid].insertLoad(load_inst);
+    if (isSpmLoadInst(load_inst)) {
+        spmThread[tid].insertLoad(load_inst);
+    } else {
+        thread[tid].insertLoad(load_inst);
+    }
 }
 
 void
@@ -278,13 +397,24 @@ LSQ::insertStore(const DynInstPtr &store_inst)
 {
     ThreadID tid = store_inst->threadNumber;
 
-    thread[tid].insertStore(store_inst);
+    if (isSpmStoreInst(store_inst)) {
+        spmThread[tid].insertStore(store_inst);
+    } else {
+        if (isSpmBridgeInst(store_inst)) {
+            spmBridgeInsts[tid].push_back(store_inst->seqNum);
+        }
+        thread[tid].insertStore(store_inst);
+    }
 }
 
 Fault
 LSQ::executeLoad(const DynInstPtr &inst)
 {
     ThreadID tid = inst->threadNumber;
+
+    if (isSpmLoadInst(inst)) {
+        return spmThread[tid].executeLoad(inst);
+    }
 
     return thread[tid].executeLoad(inst);
 }
@@ -294,6 +424,10 @@ LSQ::executeStore(const DynInstPtr &inst)
 {
     ThreadID tid = inst->threadNumber;
 
+    if (isSpmStoreInst(inst)) {
+        return spmThread[tid].executeStore(inst);
+    }
+
     return thread[tid].executeStore(inst);
 }
 
@@ -301,12 +435,14 @@ void
 LSQ::commitLoads(InstSeqNum &youngest_inst, ThreadID tid)
 {
     thread.at(tid).commitLoads(youngest_inst);
+    spmThread.at(tid).commitLoads(youngest_inst);
 }
 
 void
 LSQ::commitStores(InstSeqNum &youngest_inst, ThreadID tid)
 {
     thread.at(tid).commitStores(youngest_inst);
+    spmThread.at(tid).commitStores(youngest_inst);
 }
 
 void
@@ -319,6 +455,7 @@ LSQ::writebackStores()
         }
 
         thread[tid].writebackStores();
+        spmThread[tid].writebackStores();
     }
 }
 
@@ -326,6 +463,12 @@ void
 LSQ::squash(const InstSeqNum &squashed_num, ThreadID tid)
 {
     thread.at(tid).squash(squashed_num);
+    spmThread.at(tid).squash(squashed_num);
+
+    auto &bridges = spmBridgeInsts[tid];
+    while (!bridges.empty() && bridges.back() > squashed_num) {
+        bridges.pop_back();
+    }
 }
 
 bool
@@ -333,14 +476,18 @@ LSQ::violation()
 {
     /* Answers: Does Anybody Have a Violation?*/
     for (ThreadID tid : *activeThreads) {
-        if (thread[tid].violation())
+        if (thread[tid].violation() || spmThread[tid].violation())
             return true;
     }
 
     return false;
 }
 
-bool LSQ::violation(ThreadID tid) { return thread.at(tid).violation(); }
+bool
+LSQ::violation(ThreadID tid)
+{
+    return thread.at(tid).violation() || spmThread.at(tid).violation();
+}
 
 DynInstPtr
 LSQ::getMemDepViolator(ThreadID tid)
@@ -372,11 +519,21 @@ LSQ::getStoreHeadSeqNum(ThreadID tid)
     return thread.at(tid).getStoreHeadSeqNum();
 }
 
-int LSQ::getCount(ThreadID tid) { return thread.at(tid).getCount(); }
+int
+LSQ::getCount(ThreadID tid)
+{
+    return thread.at(tid).getCount() + spmThread.at(tid).getCount();
+}
 
-int LSQ::numLoads(ThreadID tid) { return thread.at(tid).numLoads(); }
+int LSQ::numLoads(ThreadID tid)
+{
+    return thread.at(tid).numLoads() + spmThread.at(tid).numLoads();
+}
 
-int LSQ::numStores(ThreadID tid) { return thread.at(tid).numStores(); }
+int LSQ::numStores(ThreadID tid)
+{
+    return thread.at(tid).numStores() + spmThread.at(tid).numStores();
+}
 
 int
 LSQ::numHtmStarts(ThreadID tid) const
@@ -426,6 +583,7 @@ LSQ::recvReqRetry()
 
     for (ThreadID tid : *activeThreads) {
         thread[tid].recvRetry();
+        spmThread[tid].recvRetry();
     }
 }
 
@@ -433,7 +591,10 @@ void
 LSQ::completeDataAccess(PacketPtr pkt)
 {
     LSQRequest *request = dynamic_cast<LSQRequest*>(pkt->senderState);
-    thread[cpu->contextToThread(request->contextId())]
+    auto &unit = requestUsesSpmLsq(request) ?
+        spmThread[cpu->contextToThread(request->contextId())] :
+        thread[cpu->contextToThread(request->contextId())];
+    unit
         .completeDataAccess(pkt);
 }
 
@@ -452,8 +613,17 @@ LSQ::recvTimingResp(PacketPtr pkt)
 
     LSQRequest *request = dynamic_cast<LSQRequest*>(pkt->senderState);
     panic_if(!request, "Got packet back with unknown sender state\n");
+    const DynInstPtr inst = request->instruction();
 
-    thread[cpu->contextToThread(request->contextId())].recvTimingResp(pkt);
+    auto &unit = requestUsesSpmLsq(request) ?
+        spmThread[cpu->contextToThread(request->contextId())] :
+        thread[cpu->contextToThread(request->contextId())];
+    unit.recvTimingResp(pkt);
+    if (isSpmBridgeInst(inst)) {
+        retireSpmBridge(cpu->contextToThread(request->contextId()),
+                        inst->seqNum);
+        iewStage->cacheUnblocked();
+    }
 
     if (pkt->isInvalidate()) {
         // This response also contains an invalidate; e.g. this can be the case
@@ -472,6 +642,7 @@ LSQ::recvTimingResp(PacketPtr pkt)
 
         for (ThreadID tid = 0; tid < numThreads; tid++) {
             thread[tid].checkSnoop(pkt);
+            spmThread[tid].checkSnoop(pkt);
         }
     }
     // Update the LSQRequest state (this may delete the request)
@@ -496,6 +667,7 @@ LSQ::recvTimingSnoopReq(PacketPtr pkt)
                 pkt->getAddr());
         for (ThreadID tid = 0; tid < numThreads; tid++) {
             thread[tid].checkSnoop(pkt);
+            spmThread[tid].checkSnoop(pkt);
         }
     } else if (pkt->req && pkt->req->isTlbiExtSync()) {
         DPRINTF(LSQ, "received TLBI Ext Sync\n");
@@ -505,6 +677,9 @@ LSQ::recvTimingSnoopReq(PacketPtr pkt)
         staleTranslationWaitTxnId = pkt->req->getExtraData();
 
         for (auto& unit : thread) {
+            unit.startStaleTranslationFlush();
+        }
+        for (auto& unit : spmThread) {
             unit.startStaleTranslationFlush();
         }
 
@@ -543,7 +718,7 @@ LSQ::numStores()
     unsigned total = 0;
 
     for (ThreadID tid : *activeThreads) {
-        total += thread[tid].numStores();
+        total += numStores(tid);
     }
 
     return total;
@@ -556,6 +731,7 @@ LSQ::numFreeLoadEntries()
 
     for (ThreadID tid : *activeThreads) {
         total += thread[tid].numFreeLoadEntries();
+        total += spmThread[tid].numFreeLoadEntries();
     }
 
     return total;
@@ -568,6 +744,7 @@ LSQ::numFreeStoreEntries()
 
     for (ThreadID tid : *activeThreads) {
         total += thread[tid].numFreeStoreEntries();
+        total += spmThread[tid].numFreeStoreEntries();
     }
 
     return total;
@@ -576,20 +753,23 @@ LSQ::numFreeStoreEntries()
 unsigned
 LSQ::numFreeLoadEntries(ThreadID tid)
 {
-        return thread[tid].numFreeLoadEntries();
+        return thread[tid].numFreeLoadEntries() +
+            spmThread[tid].numFreeLoadEntries();
 }
 
 unsigned
 LSQ::numFreeStoreEntries(ThreadID tid)
 {
-        return thread[tid].numFreeStoreEntries();
+        return thread[tid].numFreeStoreEntries() +
+            spmThread[tid].numFreeStoreEntries();
 }
 
 bool
 LSQ::isFull()
 {
     for (ThreadID tid : *activeThreads) {
-        if (!(thread[tid].lqFull() || thread[tid].sqFull()))
+        if (!(thread[tid].lqFull() || thread[tid].sqFull() ||
+              spmThread[tid].lqFull() || spmThread[tid].sqFull()))
             return false;
     }
 
@@ -604,7 +784,8 @@ LSQ::isFull(ThreadID tid)
     if (lsqPolicy == SMTQueuePolicy::Dynamic)
         return isFull();
     else
-        return thread[tid].lqFull() || thread[tid].sqFull();
+        return thread[tid].lqFull() || thread[tid].sqFull() ||
+            spmThread[tid].lqFull() || spmThread[tid].sqFull();
 }
 
 bool
@@ -617,7 +798,7 @@ bool
 LSQ::lqEmpty() const
 {
     for (ThreadID tid : *activeThreads) {
-        if (!thread[tid].lqEmpty())
+        if (!thread[tid].lqEmpty() || !spmThread[tid].lqEmpty())
             return false;
     }
 
@@ -628,7 +809,7 @@ bool
 LSQ::sqEmpty() const
 {
     for (ThreadID tid : *activeThreads) {
-        if (!thread[tid].sqEmpty())
+        if (!thread[tid].sqEmpty() || !spmThread[tid].sqEmpty())
             return false;
     }
 
@@ -658,6 +839,12 @@ LSQ::lqFull(ThreadID tid)
 }
 
 bool
+LSQ::spmLqFull(ThreadID tid)
+{
+    return spmThread[tid].lqFull();
+}
+
+bool
 LSQ::sqFull()
 {
     for (ThreadID tid : *activeThreads) {
@@ -677,6 +864,12 @@ LSQ::sqFull(ThreadID tid)
         return sqFull();
     else
         return thread[tid].sqFull();
+}
+
+bool
+LSQ::spmSqFull(ThreadID tid)
+{
+    return spmThread[tid].sqFull();
 }
 
 bool
@@ -764,8 +957,19 @@ LSQ::pushRequest(const DynInstPtr& inst, bool isLoad, uint8_t *data,
     [[maybe_unused]] bool isAtomic = !isLoad && amo_op;
 
     ThreadID tid = cpu->contextToThread(inst->contextId());
+    LSQUnit *request_unit = isSpmOnlyInst(inst) ? &spmThread[tid] :
+        &thread[tid];
     auto cacheLineSize = cpu->cacheLineSize();
+    const bool spm_direct =
+        flags.isSet(Request::SPMLD) || flags.isSet(Request::SPMST) ||
+        flags.isSet(Request::SPMWB_READ);
     bool needs_burst = transferNeedsBurst(addr, size, cacheLineSize);
+    if (spm_direct) {
+        // CacheFlex SPM vector ops are architecturally single accesses.  A
+        // wide spm.ld1qd spans consecutive SPM ways inside the private SPM
+        // datapath; it must not be decomposed into multiple Ruby requests.
+        needs_burst = false;
+    }
     LSQRequest* request = nullptr;
 
     // Atomic requests that access data across cache line boundary are
@@ -786,12 +990,12 @@ LSQ::pushRequest(const DynInstPtr& inst, bool isLoad, uint8_t *data,
         if (htm_cmd || tlbi_cmd) {
             assert(addr == 0x0lu);
             assert(size == 8);
-            request = new UnsquashableDirectRequest(&thread[tid], inst, flags);
+            request = new UnsquashableDirectRequest(request_unit, inst, flags);
         } else if (needs_burst) {
-            request = new SplitDataRequest(&thread[tid], inst, isLoad, addr,
+            request = new SplitDataRequest(request_unit, inst, isLoad, addr,
                     size, flags, data, res);
         } else {
-            request = new SingleDataRequest(&thread[tid], inst, isLoad, addr,
+            request = new SingleDataRequest(request_unit, inst, isLoad, addr,
                     size, flags, data, res, std::move(amo_op));
         }
         assert(request);
@@ -959,8 +1163,6 @@ LSQ::SplitDataRequest::initiateTranslation()
 {
     auto cacheLineSize = _port.cacheLineSize();
     Addr base_addr = _addr;
-    Addr next_addr = addrBlockAlign(_addr + cacheLineSize, cacheLineSize);
-    Addr final_addr = addrBlockAlign(_addr + _size, cacheLineSize);
     uint32_t size_so_far = 0;
 
     _mainReq = std::make_shared<Request>(base_addr,
@@ -973,6 +1175,9 @@ LSQ::SplitDataRequest::initiateTranslation()
     // setFlags() assumes that paddr is set so flip the paddr valid bit here to
     // avoid a potential assert in setFlags() when we call it from  finish().
     _mainReq->setPaddr(0);
+
+    Addr next_addr = addrBlockAlign(_addr + cacheLineSize, cacheLineSize);
+    Addr final_addr = addrBlockAlign(_addr + _size, cacheLineSize);
 
     /* Get the pre-fix, possibly unaligned. */
     auto it_start = _byteEnable.begin();
@@ -1280,7 +1485,8 @@ LSQ::SplitDataRequest::buildPackets()
             RequestPtr req = _reqs[i];
             PacketPtr pkt = isLoad() ? Packet::createRead(req)
                                      : Packet::createWrite(req);
-            ptrdiff_t offset = req->getVaddr() - base_address;
+            ptrdiff_t offset =
+                static_cast<ptrdiff_t>(req->getVaddr() - base_address);
             if (isLoad()) {
                 pkt->dataStatic(_inst->memData + offset);
             } else {
@@ -1524,6 +1730,18 @@ LSQ::DcachePort::recvReqRetry()
     lsq->recvReqRetry();
 }
 
+bool
+LSQ::SpmPort::recvTimingResp(PacketPtr pkt)
+{
+    return lsq->recvTimingResp(pkt);
+}
+
+void
+LSQ::SpmPort::recvReqRetry()
+{
+    lsq->recvReqRetry();
+}
+
 LSQ::UnsquashableDirectRequest::UnsquashableDirectRequest(
     LSQUnit* port,
     const DynInstPtr& inst,
@@ -1621,6 +1839,10 @@ LSQ::read(LSQRequest* request, ssize_t load_idx)
     assert(request->req()->contextId() == request->contextId());
     ThreadID tid = cpu->contextToThread(request->req()->contextId());
 
+    if (requestUsesSpmLsq(request)) {
+        return spmThread.at(tid).read(request, load_idx);
+    }
+
     return thread.at(tid).read(request, load_idx);
 }
 
@@ -1628,6 +1850,10 @@ Fault
 LSQ::write(LSQRequest* request, uint8_t *data, ssize_t store_idx)
 {
     ThreadID tid = cpu->contextToThread(request->req()->contextId());
+
+    if (requestUsesSpmLsq(request)) {
+        return spmThread.at(tid).write(request, data, store_idx);
+    }
 
     return thread.at(tid).write(request, data, store_idx);
 }

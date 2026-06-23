@@ -88,11 +88,14 @@ let {{
                 self.memFlags.append("Request::LLSC")
 
             if self.flavor == "SPMST":
+                self.instFlags.append("IsSPMMem")
                 self.memFlags.append("Request::SPMST")
                 self.memFlags.append("Request::PHYSICAL")
             elif self.flavor == "SPMCP":
+                self.instFlags.append("IsSPMMem")
                 self.memFlags.append("Request::SPMCP_FETCH")
             elif self.flavor == "SPMWB":
+                self.instFlags.append("IsSPMMem")
                 self.memFlags.append("Request::SPMWB_STORE")
 
         def emitHelper(self, base = 'Memory64', wbDecl = None):

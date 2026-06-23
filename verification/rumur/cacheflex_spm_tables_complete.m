@@ -3,7 +3,7 @@
 
 type
   CCState: enum {
-    C_I, C_ISD, C_IMAD, C_IMA, C_S, C_SXA, C_SMAD, C_SMA, C_M, C_MXA, C_E, C_EXA, C_MIA, C_EIA, C_SIA, C_IIA, C_IXD, C_X, C_XWB
+    C_I, C_ISD, C_IMAD, C_IMA, C_S, C_SXL0, C_SXA, C_SMAD, C_SMA, C_M, C_MXL0, C_MXA, C_E, C_EXL0, C_EXA, C_M_I, C_SINK_WB_ACK, C_MIA, C_EIA, C_SIA, C_IIA, C_IXD, C_X, C_XWB
   };
   DirState: enum {
     D_I, D_S, D_E, D_M, D_SD
@@ -26,11 +26,18 @@ endstartstate;
     cc_state := C_ISD;
   endrule;
 
-  rule "CC I x SPMCP_fetch (coherent)"
+  rule "CC I x SPMCP_fetch"
     cc_state = C_I
   ==>
   begin
     cc_state := C_IXD;
+  endrule;
+
+  rule "CC I x SPMCP_install"
+    cc_state = C_I
+  ==>
+  begin
+    cc_state := C_X;
   endrule;
 
   rule "CC I x SPMWB_store"
@@ -47,21 +54,28 @@ endstartstate;
     cc_state := C_IMAD;
   endrule;
 
-  rule "CC I x SPMWB_read (SPM)"
+  rule "CC I x SPMWB_read"
     cc_state = C_I
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC I x SPMLD (SPM)"
+  rule "CC I x SPM_release"
     cc_state = C_I
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC I x SPMST (SPM)"
+  rule "CC I x SPMLD"
+    cc_state = C_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC I x SPMST"
     cc_state = C_I
   ==>
   begin
@@ -75,14 +89,14 @@ endstartstate;
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IS^D x SPMCP_fetch (coherent)"
+  rule "CC IS^D x SPMCP_fetch"
     cc_state = C_ISD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IS^D x SPMCP_install (SPM)"
+  rule "CC IS^D x SPMCP_install"
     cc_state = C_ISD
   ==>
   begin
@@ -103,21 +117,28 @@ endstartstate;
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IS^D x SPMWB_read (SPM)"
+  rule "CC IS^D x SPMWB_read"
     cc_state = C_ISD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IS^D x SPMLD (SPM)"
+  rule "CC IS^D x SPM_release"
     cc_state = C_ISD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IS^D x SPMST (SPM)"
+  rule "CC IS^D x SPMLD"
+    cc_state = C_ISD
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC IS^D x SPMST"
     cc_state = C_ISD
   ==>
   begin
@@ -138,24 +159,21 @@ endstartstate;
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IS^D x Exclusive Data 
-from Dir"
+  rule "CC IS^D x Exclusive Data from Dir"
     cc_state = C_ISD
   ==>
   begin
     cc_state := C_E;
   endrule;
 
-  rule "CC IS^D x Data from Dir
-(ack=0)"
+  rule "CC IS^D x Data from Dir (ack=0)"
     cc_state = C_ISD
   ==>
   begin
     cc_state := C_S;
   endrule;
 
-  rule "CC IS^D x Data from 
-Owner"
+  rule "CC IS^D x Data from Owner"
     cc_state = C_ISD
   ==>
   begin
@@ -169,14 +187,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IM^AD x SPMCP_fetch (coherent)"
+  rule "CC IM^AD x SPMCP_fetch"
     cc_state = C_IMAD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IM^AD x SPMCP_install (SPM)"
+  rule "CC IM^AD x SPMCP_install"
     cc_state = C_IMAD
   ==>
   begin
@@ -197,21 +215,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IM^AD x SPMWB_read (SPM)"
+  rule "CC IM^AD x SPMWB_read"
     cc_state = C_IMAD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IM^AD x SPMLD (SPM)"
+  rule "CC IM^AD x SPM_release"
     cc_state = C_IMAD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IM^AD x SPMST (SPM)"
+  rule "CC IM^AD x SPMLD"
+    cc_state = C_IMAD
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC IM^AD x SPMST"
     cc_state = C_IMAD
   ==>
   begin
@@ -239,24 +264,21 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IM^AD x Data from Dir
-(ack=0)"
+  rule "CC IM^AD x Data from Dir (ack=0)"
     cc_state = C_IMAD
   ==>
   begin
     cc_state := C_M;
   endrule;
 
-  rule "CC IM^AD x Data from Dir 
-(ack>0)"
+  rule "CC IM^AD x Data from Dir (ack>0)"
     cc_state = C_IMAD
   ==>
   begin
     cc_state := C_IMA;
   endrule;
 
-  rule "CC IM^AD x Data from 
-Owner"
+  rule "CC IM^AD x Data from Owner"
     cc_state = C_IMAD
   ==>
   begin
@@ -277,14 +299,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IM^A x SPMCP_fetch (coherent)"
+  rule "CC IM^A x SPMCP_fetch"
     cc_state = C_IMA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IM^A x SPMCP_install (SPM)"
+  rule "CC IM^A x SPMCP_install"
     cc_state = C_IMA
   ==>
   begin
@@ -305,21 +327,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IM^A x SPMWB_read (SPM)"
+  rule "CC IM^A x SPMWB_read"
     cc_state = C_IMA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IM^A x SPMLD (SPM)"
+  rule "CC IM^A x SPM_release"
     cc_state = C_IMA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IM^A x SPMST (SPM)"
+  rule "CC IM^A x SPMLD"
+    cc_state = C_IMA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC IM^A x SPMST"
     cc_state = C_IMA
   ==>
   begin
@@ -368,18 +397,18 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC S x SPMCP_fetch (coherent)"
+  rule "CC S x SPMCP_fetch"
     cc_state = C_S
   ==>
   begin
     cc_state := C_SXA;
   endrule;
 
-  rule "CC S x SPMCP_install (SPM)"
+  rule "CC S x SPMCP_install"
     cc_state = C_S
   ==>
   begin
-    cc_state := C_S;
+    cc_state := C_X;
   endrule;
 
   rule "CC S x SPMWB_store"
@@ -396,21 +425,28 @@ Owner"
     cc_state := C_SMAD;
   endrule;
 
-  rule "CC S x SPMWB_read (SPM)"
+  rule "CC S x SPMWB_read"
     cc_state = C_S
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC S x SPMLD (SPM)"
+  rule "CC S x SPM_release"
     cc_state = C_S
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC S x SPMST (SPM)"
+  rule "CC S x SPMLD"
+    cc_state = C_S
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC S x SPMST"
     cc_state = C_S
   ==>
   begin
@@ -431,6 +467,111 @@ Owner"
     cc_state := C_I;
   endrule;
 
+  rule "CC SX^L0 x Load"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x SPMCP_fetch"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x SPMCP_install"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x SPMWB_store"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x Store"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x SPMWB_read"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x SPM_release"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x SPMLD"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x SPMST"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x Replacement"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x Fwd-GetS"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x Fwd-GetS_Silent"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x Fwd-GetM"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x Inv"
+    cc_state = C_SXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^L0 x L0 recall resp"
+    cc_state = C_SXL0
+  ==>
+  begin
+    cc_state := C_SXA;
+  endrule;
+
   rule "CC SX^A x Load"
     cc_state = C_SXA
   ==>
@@ -438,14 +579,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SX^A x SPMCP_fetch (coherent)"
+  rule "CC SX^A x SPMCP_fetch"
     cc_state = C_SXA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SX^A x SPMCP_install (SPM)"
+  rule "CC SX^A x SPMCP_install"
     cc_state = C_SXA
   ==>
   begin
@@ -466,21 +607,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SX^A x SPMWB_read (SPM)"
+  rule "CC SX^A x SPMWB_read"
     cc_state = C_SXA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SX^A x SPMLD (SPM)"
+  rule "CC SX^A x SPM_release"
     cc_state = C_SXA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SX^A x SPMST (SPM)"
+  rule "CC SX^A x SPMLD"
+    cc_state = C_SXA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SX^A x SPMST"
     cc_state = C_SXA
   ==>
   begin
@@ -498,7 +646,7 @@ Owner"
     cc_state = C_SXA
   ==>
   begin
-    cc_state := C_SXA;
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
   rule "CC SX^A x Fwd-GetM"
@@ -512,7 +660,7 @@ Owner"
     cc_state = C_SXA
   ==>
   begin
-    cc_state := C_SXA;
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
   rule "CC SX^A x Put-Ack"
@@ -529,14 +677,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SM^AD x SPMCP_fetch (coherent)"
+  rule "CC SM^AD x SPMCP_fetch"
     cc_state = C_SMAD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SM^AD x SPMCP_install (SPM)"
+  rule "CC SM^AD x SPMCP_install"
     cc_state = C_SMAD
   ==>
   begin
@@ -557,21 +705,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SM^AD x SPMWB_read (SPM)"
+  rule "CC SM^AD x SPMWB_read"
     cc_state = C_SMAD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SM^AD x SPMLD (SPM)"
+  rule "CC SM^AD x SPM_release"
     cc_state = C_SMAD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SM^AD x SPMST (SPM)"
+  rule "CC SM^AD x SPMLD"
+    cc_state = C_SMAD
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SM^AD x SPMST"
     cc_state = C_SMAD
   ==>
   begin
@@ -606,16 +761,14 @@ Owner"
     cc_state := C_IMAD;
   endrule;
 
-  rule "CC SM^AD x Data from Dir
-(ack=0)"
+  rule "CC SM^AD x Data from Dir (ack=0)"
     cc_state = C_SMAD
   ==>
   begin
     cc_state := C_M;
   endrule;
 
-  rule "CC SM^AD x Data from Dir 
-(ack>0)"
+  rule "CC SM^AD x Data from Dir (ack>0)"
     cc_state = C_SMAD
   ==>
   begin
@@ -636,14 +789,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SM^A x SPMCP_fetch (coherent)"
+  rule "CC SM^A x SPMCP_fetch"
     cc_state = C_SMA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SM^A x SPMCP_install (SPM)"
+  rule "CC SM^A x SPMCP_install"
     cc_state = C_SMA
   ==>
   begin
@@ -664,21 +817,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SM^A x SPMWB_read (SPM)"
+  rule "CC SM^A x SPMWB_read"
     cc_state = C_SMA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SM^A x SPMLD (SPM)"
+  rule "CC SM^A x SPM_release"
     cc_state = C_SMA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SM^A x SPMST (SPM)"
+  rule "CC SM^A x SPMLD"
+    cc_state = C_SMA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SM^A x SPMST"
     cc_state = C_SMA
   ==>
   begin
@@ -727,18 +887,18 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC M x SPMCP_fetch (coherent)"
+  rule "CC M x SPMCP_fetch"
     cc_state = C_M
   ==>
   begin
     cc_state := C_MXA;
   endrule;
 
-  rule "CC M x SPMCP_install (SPM)"
+  rule "CC M x SPMCP_install"
     cc_state = C_M
   ==>
   begin
-    cc_state := C_M;
+    cc_state := C_X;
   endrule;
 
   rule "CC M x SPMWB_store"
@@ -755,21 +915,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC M x SPMWB_read (SPM)"
+  rule "CC M x SPMWB_read"
     cc_state = C_M
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC M x SPMLD (SPM)"
+  rule "CC M x SPM_release"
     cc_state = C_M
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC M x SPMST (SPM)"
+  rule "CC M x SPMLD"
+    cc_state = C_M
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M x SPMST"
     cc_state = C_M
   ==>
   begin
@@ -797,6 +964,111 @@ Owner"
     cc_state := C_I;
   endrule;
 
+  rule "CC MX^L0 x Load"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x SPMCP_fetch"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x SPMCP_install"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x SPMWB_store"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x Store"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x SPMWB_read"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x SPM_release"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x SPMLD"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x SPMST"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x Replacement"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x Fwd-GetS"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x Fwd-GetS_Silent"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x Fwd-GetM"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x Inv"
+    cc_state = C_MXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^L0 x L0 recall resp"
+    cc_state = C_MXL0
+  ==>
+  begin
+    cc_state := C_MXA;
+  endrule;
+
   rule "CC MX^A x Load"
     cc_state = C_MXA
   ==>
@@ -804,14 +1076,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC MX^A x SPMCP_fetch (coherent)"
+  rule "CC MX^A x SPMCP_fetch"
     cc_state = C_MXA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC MX^A x SPMCP_install (SPM)"
+  rule "CC MX^A x SPMCP_install"
     cc_state = C_MXA
   ==>
   begin
@@ -832,21 +1104,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC MX^A x SPMWB_read (SPM)"
+  rule "CC MX^A x SPMWB_read"
     cc_state = C_MXA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC MX^A x SPMLD (SPM)"
+  rule "CC MX^A x SPM_release"
     cc_state = C_MXA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC MX^A x SPMST (SPM)"
+  rule "CC MX^A x SPMLD"
+    cc_state = C_MXA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^A x SPMST"
     cc_state = C_MXA
   ==>
   begin
@@ -867,7 +1146,21 @@ Owner"
     cc_state := C_SXA;
   endrule;
 
+  rule "CC MX^A x Fwd-GetS_Silent"
+    cc_state = C_MXA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
   rule "CC MX^A x Fwd-GetM"
+    cc_state = C_MXA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MX^A x Inv"
     cc_state = C_MXA
   ==>
   begin
@@ -888,18 +1181,18 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC E x SPMCP_fetch (coherent)"
+  rule "CC E x SPMCP_fetch"
     cc_state = C_E
   ==>
   begin
     cc_state := C_EXA;
   endrule;
 
-  rule "CC E x SPMCP_install (SPM)"
+  rule "CC E x SPMCP_install"
     cc_state = C_E
   ==>
   begin
-    cc_state := C_E;
+    cc_state := C_X;
   endrule;
 
   rule "CC E x SPMWB_store"
@@ -916,21 +1209,28 @@ Owner"
     cc_state := C_M;
   endrule;
 
-  rule "CC E x SPMWB_read (SPM)"
+  rule "CC E x SPMWB_read"
     cc_state = C_E
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC E x SPMLD (SPM)"
+  rule "CC E x SPM_release"
     cc_state = C_E
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC E x SPMST (SPM)"
+  rule "CC E x SPMLD"
+    cc_state = C_E
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC E x SPMST"
     cc_state = C_E
   ==>
   begin
@@ -958,6 +1258,111 @@ Owner"
     cc_state := C_I;
   endrule;
 
+  rule "CC EX^L0 x Load"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x SPMCP_fetch"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x SPMCP_install"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x SPMWB_store"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x Store"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x SPMWB_read"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x SPM_release"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x SPMLD"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x SPMST"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x Replacement"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x Fwd-GetS"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x Fwd-GetS_Silent"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x Fwd-GetM"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x Inv"
+    cc_state = C_EXL0
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^L0 x L0 recall resp"
+    cc_state = C_EXL0
+  ==>
+  begin
+    cc_state := C_EXA;
+  endrule;
+
   rule "CC EX^A x Load"
     cc_state = C_EXA
   ==>
@@ -965,14 +1370,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC EX^A x SPMCP_fetch (coherent)"
+  rule "CC EX^A x SPMCP_fetch"
     cc_state = C_EXA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC EX^A x SPMCP_install (SPM)"
+  rule "CC EX^A x SPMCP_install"
     cc_state = C_EXA
   ==>
   begin
@@ -993,21 +1398,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC EX^A x SPMWB_read (SPM)"
+  rule "CC EX^A x SPMWB_read"
     cc_state = C_EXA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC EX^A x SPMLD (SPM)"
+  rule "CC EX^A x SPM_release"
     cc_state = C_EXA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC EX^A x SPMST (SPM)"
+  rule "CC EX^A x SPMLD"
+    cc_state = C_EXA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^A x SPMST"
     cc_state = C_EXA
   ==>
   begin
@@ -1028,7 +1440,21 @@ Owner"
     cc_state := C_SXA;
   endrule;
 
+  rule "CC EX^A x Fwd-GetS_Silent"
+    cc_state = C_EXA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
   rule "CC EX^A x Fwd-GetM"
+    cc_state = C_EXA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EX^A x Inv"
     cc_state = C_EXA
   ==>
   begin
@@ -1042,6 +1468,216 @@ Owner"
     cc_state := C_X;
   endrule;
 
+  rule "CC M_I x Load"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x SPMCP_fetch"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x SPMCP_install"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x SPMWB_store"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x Store"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x SPMWB_read"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x SPM_release"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x SPMLD"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x SPMST"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x WB-Ack"
+    cc_state = C_M_I
+  ==>
+  begin
+    cc_state := C_I;
+  endrule;
+
+  rule "CC M_I x Replacement"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x Fwd-GetS"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x Fwd-GetS_Silent"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x Fwd-GetM"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC M_I x Inv"
+    cc_state = C_M_I
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x Load"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x SPMCP_fetch"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x SPMCP_install"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x SPMWB_store"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x Store"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x SPMWB_read"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x SPM_release"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x SPMLD"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x SPMST"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x WB-Ack"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    cc_state := C_I;
+  endrule;
+
+  rule "CC SINK_WB_ACK x Replacement"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x Fwd-GetS"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x Fwd-GetS_Silent"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x Fwd-GetM"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SINK_WB_ACK x Inv"
+    cc_state = C_SINK_WB_ACK
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
   rule "CC MI^A x Load"
     cc_state = C_MIA
   ==>
@@ -1049,14 +1685,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC MI^A x SPMCP_fetch (coherent)"
+  rule "CC MI^A x SPMCP_fetch"
     cc_state = C_MIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC MI^A x SPMCP_install (SPM)"
+  rule "CC MI^A x SPMCP_install"
     cc_state = C_MIA
   ==>
   begin
@@ -1077,21 +1713,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC MI^A x SPMWB_read (SPM)"
+  rule "CC MI^A x SPMWB_read"
     cc_state = C_MIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC MI^A x SPMLD (SPM)"
+  rule "CC MI^A x SPM_release"
     cc_state = C_MIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC MI^A x SPMST (SPM)"
+  rule "CC MI^A x SPMLD"
+    cc_state = C_MIA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC MI^A x SPMST"
     cc_state = C_MIA
   ==>
   begin
@@ -1133,14 +1776,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC EI^A x SPMCP_fetch (coherent)"
+  rule "CC EI^A x SPMCP_fetch"
     cc_state = C_EIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC EI^A x SPMCP_install (SPM)"
+  rule "CC EI^A x SPMCP_install"
     cc_state = C_EIA
   ==>
   begin
@@ -1161,21 +1804,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC EI^A x SPMWB_read (SPM)"
+  rule "CC EI^A x SPMWB_read"
     cc_state = C_EIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC EI^A x SPMLD (SPM)"
+  rule "CC EI^A x SPM_release"
     cc_state = C_EIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC EI^A x SPMST (SPM)"
+  rule "CC EI^A x SPMLD"
+    cc_state = C_EIA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC EI^A x SPMST"
     cc_state = C_EIA
   ==>
   begin
@@ -1217,14 +1867,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SI^A x SPMCP_fetch (coherent)"
+  rule "CC SI^A x SPMCP_fetch"
     cc_state = C_SIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SI^A x SPMCP_install (SPM)"
+  rule "CC SI^A x SPMCP_install"
     cc_state = C_SIA
   ==>
   begin
@@ -1245,21 +1895,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SI^A x SPMWB_read (SPM)"
+  rule "CC SI^A x SPMWB_read"
     cc_state = C_SIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SI^A x SPMLD (SPM)"
+  rule "CC SI^A x SPM_release"
     cc_state = C_SIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC SI^A x SPMST (SPM)"
+  rule "CC SI^A x SPMLD"
+    cc_state = C_SIA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC SI^A x SPMST"
     cc_state = C_SIA
   ==>
   begin
@@ -1294,14 +1951,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC II^A x SPMCP_fetch (coherent)"
+  rule "CC II^A x SPMCP_fetch"
     cc_state = C_IIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC II^A x SPMCP_install (SPM)"
+  rule "CC II^A x SPMCP_install"
     cc_state = C_IIA
   ==>
   begin
@@ -1322,21 +1979,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC II^A x SPMWB_read (SPM)"
+  rule "CC II^A x SPMWB_read"
     cc_state = C_IIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC II^A x SPMLD (SPM)"
+  rule "CC II^A x SPM_release"
     cc_state = C_IIA
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC II^A x SPMST (SPM)"
+  rule "CC II^A x SPMLD"
+    cc_state = C_IIA
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC II^A x SPMST"
     cc_state = C_IIA
   ==>
   begin
@@ -1364,14 +2028,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IX^D x SPMCP_fetch (coherent)"
+  rule "CC IX^D x SPMCP_fetch"
     cc_state = C_IXD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IX^D x SPMCP_install (SPM)"
+  rule "CC IX^D x SPMCP_install"
     cc_state = C_IXD
   ==>
   begin
@@ -1392,21 +2056,28 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IX^D x SPMWB_read (SPM)"
+  rule "CC IX^D x SPMWB_read"
     cc_state = C_IXD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IX^D x SPMLD (SPM)"
+  rule "CC IX^D x SPM_release"
     cc_state = C_IXD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IX^D x SPMST (SPM)"
+  rule "CC IX^D x SPMLD"
+    cc_state = C_IXD
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC IX^D x SPMST"
     cc_state = C_IXD
   ==>
   begin
@@ -1420,24 +2091,49 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC IX^D x Exclusive Data 
-from Dir"
+  rule "CC IX^D x Fwd-GetS"
+    cc_state = C_IXD
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC IX^D x Fwd-GetS_Silent"
+    cc_state = C_IXD
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC IX^D x Fwd-GetM"
+    cc_state = C_IXD
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC IX^D x Inv"
+    cc_state = C_IXD
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC IX^D x Exclusive Data from Dir"
     cc_state = C_IXD
   ==>
   begin
     cc_state := C_X;
   endrule;
 
-  rule "CC IX^D x Data from Dir
-(ack=0)"
+  rule "CC IX^D x Data from Dir (ack=0)"
     cc_state = C_IXD
   ==>
   begin
     cc_state := C_X;
   endrule;
 
-  rule "CC IX^D x Data from 
-Owner"
+  rule "CC IX^D x Data from Owner"
     cc_state = C_IXD
   ==>
   begin
@@ -1451,7 +2147,7 @@ Owner"
     cc_state := C_XWB;
   endrule;
 
-  rule "CC X x SPMWB_read (SPM)"
+  rule "CC X x SPMWB_read"
     cc_state = C_X
   ==>
   begin
@@ -1465,18 +2161,53 @@ Owner"
     cc_state := C_I;
   endrule;
 
-  rule "CC X x SPMLD (SPM)"
+  rule "CC X x SPMLD"
     cc_state = C_X
   ==>
   begin
     cc_state := C_X;
   endrule;
 
-  rule "CC X x SPMST (SPM)"
+  rule "CC X x SPMST"
     cc_state = C_X
   ==>
   begin
     cc_state := C_X;
+  endrule;
+
+  rule "CC X x Replacement"
+    cc_state = C_X
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC X x Fwd-GetS"
+    cc_state = C_X
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC X x Fwd-GetM"
+    cc_state = C_X
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC X x Inv"
+    cc_state = C_X
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC XWB x Load"
+    cc_state = C_XWB
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
   rule "CC XWB x SPMWB_store"
@@ -1486,7 +2217,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC XWB x SPMWB_read (SPM)"
+  rule "CC XWB x Store"
+    cc_state = C_XWB
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC XWB x SPMWB_read"
     cc_state = C_XWB
   ==>
   begin
@@ -1500,14 +2238,14 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC XWB x SPMLD (SPM)"
+  rule "CC XWB x SPMLD"
     cc_state = C_XWB
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "CC XWB x SPMST (SPM)"
+  rule "CC XWB x SPMST"
     cc_state = C_XWB
   ==>
   begin
@@ -1519,6 +2257,41 @@ Owner"
   ==>
   begin
     cc_state := C_X;
+  endrule;
+
+  rule "CC XWB x Replacement"
+    cc_state = C_XWB
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC XWB x Fwd-GetS"
+    cc_state = C_XWB
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC XWB x Fwd-GetS_Silent"
+    cc_state = C_XWB
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC XWB x Fwd-GetM"
+    cc_state = C_XWB
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "CC XWB x Inv"
+    cc_state = C_XWB
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
   rule "DIR I x SPMWB_Req"
@@ -1577,6 +2350,13 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
+  rule "DIR S x SPMWB_Req"
+    dir_state = D_S
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
   rule "DIR S x GetS_silent"
     dir_state = D_S
   ==>
@@ -1621,6 +2401,27 @@ Owner"
 
   rule "DIR S x PutE from Non-Owner"
     dir_state = D_S
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "DIR S x SPM_PutS/PutE"
+    dir_state = D_S
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "DIR S x SPM_PutM"
+    dir_state = D_S
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "DIR E x SPMWB_Req"
+    dir_state = D_E
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
@@ -1689,6 +2490,27 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
+  rule "DIR E x SPM_PutS/PutE"
+    dir_state = D_E
+  ==>
+  begin
+    dir_state := D_M;
+  endrule;
+
+  rule "DIR E x SPM_PutM"
+    dir_state = D_E
+  ==>
+  begin
+    dir_state := D_M;
+  endrule;
+
+  rule "DIR M x SPMWB_Req"
+    dir_state = D_M
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
   rule "DIR M x GetS_silent"
     dir_state = D_M
   ==>
@@ -1740,6 +2562,27 @@ Owner"
 
   rule "DIR M x PutE from Non-Owner"
     dir_state = D_M
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "DIR M x SPM_PutS/PutE"
+    dir_state = D_M
+  ==>
+  begin
+    dir_state := D_M;
+  endrule;
+
+  rule "DIR M x SPM_PutM"
+    dir_state = D_M
+  ==>
+  begin
+    dir_state := D_M;
+  endrule;
+
+  rule "DIR SD x SPMWB_Req"
+    dir_state = D_SD
   ==>
   begin
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
@@ -1808,11 +2651,25 @@ Owner"
     -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
   endrule;
 
-  rule "DIR SD x Data"
+  rule "DIR SD x SPM_PutS/PutE"
     dir_state = D_SD
   ==>
   begin
-    dir_state := D_S;
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "DIR SD x SPM_PutM"
+    dir_state = D_SD
+  ==>
+  begin
+    -- stutter: Hit, Stall, Ignore, Return zero, ack--, or action-only cell
+  endrule;
+
+  rule "DIR SD x Unblock"
+    dir_state = D_SD
+  ==>
+  begin
+    dir_state := D_M;
   endrule;
 
 invariant "CC table state remains declared"

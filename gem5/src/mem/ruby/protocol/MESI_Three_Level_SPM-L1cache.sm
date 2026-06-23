@@ -797,6 +797,23 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     }
   }
 
+  action(spm_sendSilentDataToRequestor_fromTBE, "spsdt", desc="send an SPM data snapshot from a writeback TBE") {
+    peek(requestNetwork_in, RequestMsg) {
+      enqueue(responseNetwork_out, ResponseMsg, l1_response_latency) {
+        assert(is_valid(tbe));
+        out_msg.addr := address;
+        out_msg.DstSPMAddr := in_msg.DstSPMAddr;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.DataBlk := tbe.DataBlk;
+        out_msg.Dirty := false;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Response_Data;
+        out_msg.AckCount := 0;
+      }
+    }
+  }
+
   action(j_sendUnblock, "j", desc="send unblock to the L2 cache") {
     enqueue(unblockNetwork_out, ResponseMsg, to_l2_latency) {
       out_msg.addr := address;
@@ -1053,6 +1070,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   action(spm_readHitToL0, "sprh", desc="Return SPM data to L0") {
+    peek(messageBufferFromL0_in, CoherenceMsg) {
     enqueue(spmBufferToL0_out, CoherenceMsg, spm_response_latency) {
       assert(is_valid(cache_entry));
       assert(cache_entry.isScratchpad());
@@ -1060,20 +1078,24 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
       out_msg.Class := CoherenceClass:SPM_DATA;
       out_msg.Sender := machineID;
       out_msg.Dest := createMachineID(MachineType:L0Cache, version);
-      out_msg.DataBlk := cache_entry.DataBlk;
+      out_msg.DataBlk := cache.readSPMData(address, in_msg.Len);
+      out_msg.Len := in_msg.Len;
       out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
     }
   }
 
   action(spm_readZeroToL0, "sprz", desc="Return zero for absent/non-SPM SPM read") {
-    spmZeroData.clear();
+    peek(messageBufferFromL0_in, CoherenceMsg) {
     enqueue(spmBufferToL0_out, CoherenceMsg, spm_response_latency) {
       out_msg.addr := address;
       out_msg.Class := CoherenceClass:SPM_DATA;
       out_msg.Sender := machineID;
       out_msg.Dest := createMachineID(MachineType:L0Cache, version);
-      out_msg.DataBlk := spmZeroData;
+      out_msg.DataBlk := cache.readSPMData(address, in_msg.Len);
+      out_msg.Len := in_msg.Len;
       out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
     }
   }
 
@@ -1268,10 +1290,16 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     l_popL2RequestQueue;
   }
 
+  transition(M_I, Fwd_GETS_Silent, SINK_WB_ACK) {
+    spm_sendSilentDataToRequestor_fromTBE;
+    j_sendUnblock;
+    l_popL2RequestQueue;
+  }
+
   // The freshest data has not settled into this L1 yet (still recalling L0 for
   // our own SPMCP_fetch, installing, or writing back). Stall until it has, then
   // the transition above fires.
-  transition({SX_L0, MX_L0, EX_L0, IX_D, XWB}, Fwd_GETS_Silent) {
+  transition({SX_L0, MX_L0, EX_L0, IX_D, XWB, SINK_WB_ACK}, Fwd_GETS_Silent) {
     z2_stallAndWaitL2Queue;
   }
 
@@ -1355,6 +1383,14 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   // copied into the SPM slot without releasing the coherent source line.
   transition(MX_L0, {L0_DataAck, L0_DataCopy}, MM) {
     u_writeDataFromL0Response;
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
+    k_popL0RequestQueue;
+    kd_wakeUpDependents;
+  }
+
+  transition(MX_L0, L0_Ack, MM) {
     spm_installFromCache;
     spm_ackToL0;
     s_deallocateTBE;

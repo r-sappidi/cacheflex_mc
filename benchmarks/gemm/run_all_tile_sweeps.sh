@@ -10,7 +10,7 @@
 # PC (column groups) per shape = largest of {8,4,2,1} that is <= N/nc panels.
 # kc swept over {64,128,256,512,1024} filtered by K-divisibility and capacity:
 #   spm: kc*(nc/16) <= 6144 SPM lines
-#   blk: kc*nc*4   <= 64 KiB L0-D (deeper kc only thrashes the cache)
+#   blk: kc*nc*4   <= 512 KiB private L1D (gem5 naming; paper L2)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -18,6 +18,7 @@ G="$SCRIPT_DIR/gen"
 GEM5_SPM="${GEM5_SPM:?source setup_spm_env.sh first}"
 GEM5_SE="${GEM5_SE:?}"
 MAXJOBS="${MAXJOBS:-6}"
+RESULT_ROOT="${RESULT_ROOT:-$ROOT/results/gemm}"
 
 # id   M    K     N
 declare -A SH=(
@@ -30,7 +31,7 @@ declare -A SH=(
   [W7]="784  256   1024"
 )
 # tile-shape -> nc
-TILES=("t8x1 64" "t4x2 128" "t6x2 128" "t8x2 128" "t4x4 256" "t5x4 256")
+TILES=("t8x2 128" "t4x4 256" "t5x4 256" "t4x2 128" "t6x2 128" "t8x1 64")
 KC_CANDS=(64 128 256 512 1024)
 
 IDS=("$@"); [ ${#IDS[@]} -eq 0 ] && IDS=(W1 W2 W3 W4 W5 W6 W7)
@@ -45,7 +46,7 @@ one() {  # variant shape nc PC kc M K N id
   local variant="$1" shape="$2" nc="$3" PC="$4" kc="$5" M="$6" K="$7" N="$8" id="$9"
   local ways=0
   [ "$variant" = spm ] && ways=$(( (kc * (nc / 16) + 1023) / 1024 ))
-  local out="$ROOT/results/gemm/sweep_${id}"
+  local out="$RESULT_ROOT/sweep_${id}"
   local log="$out/${variant}_${shape}_kc${kc}.log"
   local sve=() c
   for c in $(seq 0 7); do sve+=("-P" "system.cpu[$c].isa[0].sve_vl_se=16"); done
@@ -63,14 +64,14 @@ one() {  # variant shape nc PC kc M K N id
 
 for id in "${IDS[@]}"; do
   read -r M K N <<<"${SH[$id]}"
-  mkdir -p "$ROOT/results/gemm/sweep_${id}"
+  mkdir -p "$RESULT_ROOT/sweep_${id}"
   echo "===== $id  M=$M K=$K N=$N ====="
   for spec in "${TILES[@]}"; do
     read -r shape nc <<<"$spec"
     [ $(( N % nc )) -ne 0 ] && continue           # nc must divide N
     PC=$(largest_pc $(( N / nc )))
     for variant in blk spm; do
-      if [ "$variant" = spm ]; then cap=$(( 6144 / (nc / 16) )); else cap=$(( 16384 / nc )); fi
+      if [ "$variant" = spm ]; then cap=$(( 6144 / (nc / 16) )); else cap=$(( 131072 / nc )); fi
       for kc in "${KC_CANDS[@]}"; do
         [ $(( K % kc )) -ne 0 ] && continue
         [ "$kc" -gt "$K" ] && continue

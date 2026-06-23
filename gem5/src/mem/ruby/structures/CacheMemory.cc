@@ -43,6 +43,7 @@
 
 #include "base/intmath.hh"
 #include "base/logging.hh"
+#include "base/trace.hh"
 #include "debug/HtmMem.hh"
 #include "debug/RubyCache.hh"
 #include "debug/RubyCacheTrace.hh"
@@ -377,7 +378,7 @@ CacheMemory::migrateOrClearSPMSlot(int cacheSet, int spm_way)
 
     // Live coherent occupant: relocate to a non-SPM way in the same set.
     int new_way = -1;
-    for (int w = 0; w < m_cache_assoc; w++) {
+    for (int w = m_num_spm_ways; w < m_cache_assoc; w++) {
         if (w == spm_way) continue;
         AbstractCacheEntry *e = m_cache[cacheSet][w];
         if (e != nullptr && e->isScratchpad()) continue;
@@ -455,6 +456,50 @@ CacheMemory::allocateSPMSlot(Addr address, int spm_set, int spm_way,
     DPRINTF(RubyCache, "allocating SPM slot address: %#x set: %d way: %d\n",
             address, spm_set, spm_way);
     return entry;
+}
+
+DataBlock
+CacheMemory::readSPMData(Addr address, int size)
+{
+    assert(size > 0);
+
+    DataBlock result(size);
+    result.clear();
+
+    const Addr base_addr = makeLineAddress(address);
+    const int start_way = static_cast<int>((base_addr >> 16) & 0x7);
+    const int set = static_cast<int>((base_addr >> 6) & 0x3ff);
+    const int first_offset = static_cast<int>(address & (m_block_size - 1));
+
+    int copied = 0;
+    int slot_index = 0;
+    while (copied < size) {
+        const int slot_offset = (slot_index == 0) ? first_offset : 0;
+        const int bytes = std::min(m_block_size - slot_offset, size - copied);
+        const int way = start_way + slot_index;
+
+        panic_if(way >= m_cache_assoc,
+                 "SPM read at %#x size %d crosses beyond way %d",
+                 address, size, way);
+
+        const Addr slot_addr =
+            (base_addr & ~(static_cast<Addr>(0x7) << 16)) |
+            (static_cast<Addr>(way) << 16);
+        panic_if(addressToCacheSet(slot_addr) != set,
+                 "SPM wide read slot %#x changed set from %d to %d",
+                 slot_addr, set, addressToCacheSet(slot_addr));
+
+        AbstractCacheEntry *entry = lookup(slot_addr);
+        if (entry != nullptr && entry->isScratchpad()) {
+            result.setData(entry->getDataBlk().getData(slot_offset, bytes),
+                           copied, bytes);
+        }
+
+        copied += bytes;
+        ++slot_index;
+    }
+
+    return result;
 }
 
 void

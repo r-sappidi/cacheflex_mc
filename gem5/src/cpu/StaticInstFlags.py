@@ -66,6 +66,7 @@ class StaticInstFlags(Enum):
         "IsLoad",  # Reads from memory (load or prefetch).
         "IsStore",  # Writes to memory.
         "IsAtomic",  # Does atomic RMW to memory.
+        "IsSPMMem",  # Accesses the CacheFlex scratchpad address space.
         "IsStoreConditional",  # Store conditional instruction.
         "IsInstPrefetch",  # Instruction-cache prefetch.
         "IsDataPrefetch",  # Data-cache prefetch.

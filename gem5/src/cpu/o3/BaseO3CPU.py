@@ -57,6 +57,8 @@ class BaseO3CPU(BaseCPU):
     type = "BaseO3CPU"
     cxx_class = "gem5::o3::CPU"
     cxx_header = "cpu/o3/dyn_inst.hh"
+    spm_port = RequestPort("SPM interface port")
+    _cached_ports = BaseCPU._cached_ports + ["spm_port"]
 
     @classmethod
     def memory_mode(cls):
@@ -76,6 +78,12 @@ class BaseO3CPU(BaseCPU):
         200, "Cache Ports. Constrains stores only."
     )
     cacheLoadPorts = Param.Unsigned(200, "Cache Ports. Constrains loads only.")
+    spmStorePorts = Param.Unsigned(
+        200, "SPM ports. Constrains SPM stores only."
+    )
+    spmLoadPorts = Param.Unsigned(
+        200, "SPM ports. Constrains SPM loads only."
+    )
 
     # Backward pipeline delays
     fetchToBacDelay = Param.Cycles(1, "Fetch to Branch address calc. delay")
@@ -141,6 +149,12 @@ class BaseO3CPU(BaseCPU):
 
     LQEntries = Param.Unsigned(32, "Number of load queue entries")
     SQEntries = Param.Unsigned(32, "Number of store queue entries")
+    SPMLQEntries = Param.Unsigned(
+        32, "Number of dedicated CacheFlex SPM load queue entries"
+    )
+    SPMSQEntries = Param.Unsigned(
+        48, "Number of dedicated CacheFlex SPM store queue entries"
+    )
     LSQDepCheckShift = Param.Unsigned(
         4, "Number of places to shift addr before check"
     )

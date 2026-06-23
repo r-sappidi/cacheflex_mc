@@ -44,6 +44,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <deque>
 #include <list>
 #include <map>
 #include <queue>
@@ -146,6 +147,23 @@ class LSQ
 
         /** Applies throttling in recvTimingResp for incoming load responses */
         bool throttleReadResp(PacketPtr pkt);
+    };
+
+    class SpmPort : public RequestPort
+    {
+      protected:
+        LSQ *lsq;
+        CPU *cpu;
+
+        bool recvTimingResp(PacketPtr pkt) override;
+        void recvReqRetry() override;
+
+        void recvFunctionalSnoop(PacketPtr pkt) override {}
+        void recvTimingSnoopReq(PacketPtr pkt) override {}
+        bool isSnooping() const override { return false; }
+
+      public:
+        SpmPort(LSQ *_lsq, CPU *_cpu);
     };
 
     /** Memory operation metadata.
@@ -834,6 +852,9 @@ class LSQ
     /** Returns if the SQ of a given thread is full. */
     bool sqFull(ThreadID tid);
 
+    bool spmLqFull(ThreadID tid);
+    bool spmSqFull(ThreadID tid);
+
     /**
      * Returns if the LSQ is stalled due to a memory operation that must be
      * replayed.
@@ -918,8 +939,13 @@ class LSQ
     bool cachePortAvailable(bool is_load) const;
     /** Another store port is in use */
     void cachePortBusy(bool is_load);
+    bool spmPortAvailable(bool is_load) const;
+    void spmPortBusy(bool is_load);
+    bool hasOlderSpmBridge(ThreadID tid, InstSeqNum seq_num) const;
+    void retireSpmBridge(ThreadID tid, InstSeqNum seq_num);
 
     RequestPort &getDataPort() { return dcachePort; }
+    RequestPort &getSpmPort() { return spmPort; }
 
     void sendRetryResp();
 
@@ -934,6 +960,10 @@ class LSQ
     int cacheLoadPorts;
     /** The number of used cache ports in this cycle by loads. */
     int usedLoadPorts;
+    int spmStorePorts;
+    int usedSpmStorePorts;
+    int spmLoadPorts;
+    int usedSpmLoadPorts;
 
     /** If the LSQ is currently waiting for stale translations */
     bool waitingForStaleTranslation;
@@ -983,8 +1013,14 @@ class LSQ
     /** Data port. */
     DcachePort dcachePort;
 
+    SpmPort spmPort;
+
     /** The LSQ units for individual threads. */
     std::vector<LSQUnit> thread;
+
+    std::vector<LSQUnit> spmThread;
+
+    std::vector<std::deque<InstSeqNum>> spmBridgeInsts;
 
     /** Number of Threads. */
     ThreadID numThreads;

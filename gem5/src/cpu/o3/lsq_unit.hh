@@ -465,6 +465,8 @@ class LSQUnit
     /** The load queue. */
     LoadQueue loadQueue;
 
+    bool isSpmLsq = false;
+
   private:
     /** The number of places to shift addresses in the LSQ before checking
      * for dependency violations

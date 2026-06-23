@@ -226,6 +226,8 @@ DataBlock::operator=(const DataBlock & obj)
     // Reallocate if needed
     if (m_alloc && m_block_size != obj.getBlockSize()) {
         delete [] m_data;
+        m_data = nullptr;
+        m_alloc = false;
         m_block_size = obj.getBlockSize();
         alloc();
     } else if (!m_alloc) {

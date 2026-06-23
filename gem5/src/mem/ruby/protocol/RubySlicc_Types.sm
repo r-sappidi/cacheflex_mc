@@ -220,6 +220,7 @@ structure (CacheMemory, external = "yes") {
   AbstractCacheEntry allocate(Addr, AbstractCacheEntry);
   AbstractCacheEntry allocate(Addr, AbstractCacheEntry, bool);
   AbstractCacheEntry allocateSPMSlot(Addr, int, int, AbstractCacheEntry);
+  DataBlock readSPMData(Addr, int);
   void allocateVoid(Addr, AbstractCacheEntry);
   void deallocate(Addr);
   AbstractCacheEntry lookup(Addr);

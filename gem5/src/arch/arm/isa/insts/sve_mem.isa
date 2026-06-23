@@ -2688,6 +2688,7 @@ let {{
              setSrcRegIdx(_numSrcRegs++, miscRegClass[MISCREG_CPACR_EL1]);
              flags[IsInteger] = true;
              flags[IsLoad] = true;
+             flags[IsSPMMem] = true;
              flags[IsVector] = true;
              this->memAccessFlags |= Request::SPMLD | Request::PHYSICAL;'''},
             ['IsLoad'])
@@ -2708,6 +2709,7 @@ let {{
              setSrcRegIdx(_numSrcRegs++, miscRegClass[MISCREG_CPACR_EL1]);
              flags[IsInteger] = true;
              flags[IsStore] = true;
+             flags[IsSPMMem] = true;
              flags[IsVector] = true;
              this->memAccessFlags |= Request::SPMST | Request::PHYSICAL;'''},
             ['IsStore'])

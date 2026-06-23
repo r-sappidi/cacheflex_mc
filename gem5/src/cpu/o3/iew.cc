@@ -46,6 +46,7 @@
 #include "cpu/o3/iew.hh"
 
 #include <queue>
+#include <string>
 
 #include "cpu/checker/cpu.hh"
 #include "cpu/o3/dyn_inst.hh"
@@ -62,6 +63,40 @@ namespace gem5
 
 namespace o3
 {
+
+namespace
+{
+
+bool
+startsWith(const std::string &s, const char *prefix)
+{
+    return s.rfind(prefix, 0) == 0;
+}
+
+bool
+isSpmLoadInst(const DynInstPtr &inst)
+{
+    return inst->isSPMMem() && inst->isLoad();
+}
+
+bool
+isSpmStoreInst(const DynInstPtr &inst)
+{
+    return inst->isSPMMem() && inst->isStore() &&
+        (startsWith(inst->staticInst->getName(), "spm.st") ||
+         startsWith(inst->staticInst->getName(), "spmstr"));
+}
+
+bool
+isSpmBridgeInst(const DynInstPtr &inst)
+{
+    if (!inst->isSPMMem())
+        return false;
+    const std::string name = inst->staticInst->getName();
+    return startsWith(name, "spmcp") || startsWith(name, "spmwb");
+}
+
+} // anonymous namespace
 
 // clang-format off
 std::string IEW::IEWStats::statusStrings[ThreadStatusMax] = {
@@ -173,6 +208,8 @@ IEW::IEWStats::IEWStats(CPU *cpu)
                "Number of times the IQ has become full, causing a stall"),
       ADD_STAT(lsqFullEvents, statistics::units::Count::get(),
                "Number of times the LSQ has become full, causing a stall"),
+      ADD_STAT(spmLsqFullEvents, statistics::units::Count::get(),
+               "Number of times the SPM LSQ has become full, causing a stall"),
       ADD_STAT(memOrderViolationEvents, statistics::units::Count::get(),
                "Number of memory order violations"),
       ADD_STAT(predictedTakenIncorrect, statistics::units::Count::get(),
@@ -954,12 +991,23 @@ IEW::dispatchInsts(ThreadID tid)
             break;
         }
 
-        // Check LSQ if inst is LD/ST
-        if ((inst->isAtomic() && ldstQueue.sqFull(tid)) ||
-            (inst->isLoad() && ldstQueue.lqFull(tid)) ||
-            (inst->isStore() && ldstQueue.sqFull(tid))) {
+        const bool spm_load = isSpmLoadInst(inst);
+        const bool spm_store = isSpmStoreInst(inst);
+        const bool spm_bridge = isSpmBridgeInst(inst);
+
+        const bool spm_lsq_full =
+            (spm_load && ldstQueue.spmLqFull(tid)) ||
+            ((spm_store || spm_bridge) && ldstQueue.spmSqFull(tid));
+        const bool regular_lsq_full =
+            (inst->isAtomic() && ldstQueue.sqFull(tid)) ||
+            (inst->isLoad() && !spm_load && ldstQueue.lqFull(tid)) ||
+            (inst->isStore() && !spm_store && ldstQueue.sqFull(tid));
+
+        // Check LSQ if inst is LD/ST.
+        if (spm_lsq_full || regular_lsq_full) {
             DPRINTF(IEW, "[tid:%i] Issue: %s has become full.\n",tid,
-                    inst->isLoad() ? "LQ" : "SQ");
+                    spm_lsq_full ? "SPM LSQ" :
+                    (inst->isLoad() ? "LQ" : "SQ"));
 
             // Call function to start blocking.
             block(tid);
@@ -969,7 +1017,11 @@ IEW::dispatchInsts(ThreadID tid)
             // get full in the IQ.
             toRename->iewUnblock[tid] = false;
 
-            ++iewStats.lsqFullEvents;
+            if (spm_lsq_full) {
+                ++iewStats.spmLsqFullEvents;
+            } else {
+                ++iewStats.lsqFullEvents;
+            }
             break;
         }
 

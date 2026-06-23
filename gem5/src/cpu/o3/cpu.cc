@@ -364,6 +364,20 @@ CPU::CPUStats::CPUStats(CPU *cpu)
         .prereq(quiesceCycles);
 }
 
+Port &
+CPU::getPort(const std::string &if_name, PortID idx)
+{
+    if (if_name == "dcache_port") {
+        return iew.ldstQueue.getDataPort();
+    } else if (if_name == "icache_port") {
+        return fetch.getInstPort();
+    } else if (if_name == "spm_port") {
+        return iew.ldstQueue.getSpmPort();
+    }
+
+    return BaseCPU::getPort(if_name, idx);
+}
+
 void
 CPU::tick()
 {

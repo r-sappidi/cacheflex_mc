@@ -16,7 +16,7 @@ CXXFLAGS=(-O3 -std=c++17 -static -pthread -march=armv8.2-a+sve+fp16
           -mbranch-protection=none -DGEM5 -DGEM5_SE -I"$M5_INCLUDE")
 
 SHAPES=("$@")
-[ ${#SHAPES[@]} -eq 0 ] && SHAPES=("8:1" "4:2" "6:2" "8:2" "10:2" "4:4" "5:4")
+[ ${#SHAPES[@]} -eq 0 ] && SHAPES=("8:2" "4:4" "5:4" "4:2" "6:2" "8:1")
 
 for s in "${SHAPES[@]}"; do
     mr="${s%:*}"; nb="${s#*:}"

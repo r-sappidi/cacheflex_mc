@@ -209,9 +209,11 @@ LSQUnit::init(CPU *cpu_ptr, IEW *iew_ptr, const BaseO3CPUParams &params,
 
     lsq = lsq_ptr;
 
-    cpu->addStatGroup(csprintf("lsq%i", lsqID).c_str(), &stats);
+    cpu->addStatGroup(csprintf("%s%i", isSpmLsq ? "spm_lsq" : "lsq",
+                               lsqID).c_str(), &stats);
 
-    DPRINTF(LSQUnit, "Creating LSQUnit%i object.\n",lsqID);
+    DPRINTF(LSQUnit, "Creating %sLSQUnit%i object.\n",
+            isSpmLsq ? "SPM " : "", lsqID);
 
     depCheckShift = params.LSQDepCheckShift;
     checkLoads = params.LSQCheckLoads;
@@ -244,9 +246,10 @@ std::string
 LSQUnit::name() const
 {
     if (MaxThreads == 1) {
-        return iewStage->name() + ".lsq";
+        return iewStage->name() + (isSpmLsq ? ".spm_lsq" : ".lsq");
     } else {
-        return iewStage->name() + ".lsq.thread" + std::to_string(lsqID);
+        return iewStage->name() + (isSpmLsq ? ".spm_lsq.thread" :
+                                   ".lsq.thread") + std::to_string(lsqID);
     }
 }
 
@@ -821,7 +824,8 @@ LSQUnit::writebackStores()
            storeWBIt->valid() &&
            storeWBIt->canWB() &&
            ((!needsTSO) || (!storeInFlight)) &&
-           lsq->cachePortAvailable(false)) {
+           (isSpmLsq ? lsq->spmPortAvailable(false) :
+                       lsq->cachePortAvailable(false))) {
 
         if (isStoreBlocked) {
             DPRINTF(LSQUnit, "Unable to write back any more stores, cache"
@@ -1226,8 +1230,10 @@ LSQUnit::trySendPacket(bool isLoad, PacketPtr data_pkt)
 
     LSQRequest *request = dynamic_cast<LSQRequest*>(data_pkt->senderState);
 
-    if (!lsq->cacheBlocked() &&
-        lsq->cachePortAvailable(isLoad)) {
+    const bool port_available = isSpmLsq ?
+        lsq->spmPortAvailable(isLoad) : lsq->cachePortAvailable(isLoad);
+
+    if (!lsq->cacheBlocked() && port_available) {
         if (!dcachePort->sendTimingReq(data_pkt)) {
             ret = false;
             cache_got_blocked = true;
@@ -1240,7 +1246,11 @@ LSQUnit::trySendPacket(bool isLoad, PacketPtr data_pkt)
         if (!isLoad) {
             isStoreBlocked = false;
         }
-        lsq->cachePortBusy(isLoad);
+        if (isSpmLsq) {
+            lsq->spmPortBusy(isLoad);
+        } else {
+            lsq->cachePortBusy(isLoad);
+        }
         request->packetSent();
     } else {
         if (cache_got_blocked) {

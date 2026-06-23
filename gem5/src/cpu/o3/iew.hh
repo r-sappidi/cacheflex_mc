@@ -442,6 +442,8 @@ class IEW
         statistics::Scalar iqFullEvents;
         /** Stat for number of times the LSQ becomes full. */
         statistics::Scalar lsqFullEvents;
+        /** Stat for number of times the SPM LSQ becomes full. */
+        statistics::Scalar spmLsqFullEvents;
         /** Stat for total number of memory ordering violation events. */
         statistics::Scalar memOrderViolationEvents;
         /** Stat for total number of incorrect predicted taken branches. */

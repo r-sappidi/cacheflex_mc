@@ -1,0 +1,87 @@
+CACHEFLEX_MC_ROOT=/data2/rsappidi/cacheflex_mc
+  GEM5_SPM     : OK
+  SPM_COMPILER : OK
+  m5op.o       : OK
+  CROSS_CXX    : /data2/rsappidi/cacheflex_mc/tools/arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++
+RESULT_ROOT=/homes/rsappidi/data2/cacheflex_mc/results/gemm/acl_fp16_w1w7_silentfix_20260622_112858
+MAXJOBS=2 THREADS=8 WARMUP=0 REPEAT=1 VERIFY=8
+MC_LIST=128 256
+KC_LIST=64 128 256
+===== W1 M=128 K=4096 N=11008 grid-cols=8 =====
+[11:41:51] W1 spm mc128 kc64 pc8 ways4 status=0 verify=pass
+[11:48:20] W1 blk mc128 kc64 pc8 ways0 status=0 verify=pass
+[11:59:00] W1 spm mc128 kc128 pc8 ways4 status=0 verify=pass
+[12:00:00] W1 blk mc128 kc128 pc8 ways0 status=0 verify=pass
+===== W2 M=256 K=4096 N=4096 grid-cols=8 =====
+[12:09:43] W1 spm mc128 kc256 pc8 ways4 status=0 verify=pass
+[12:16:12] W1 blk mc128 kc256 pc8 ways0 status=0 verify=pass
+[12:20:22] W2 blk mc128 kc64 pc8 ways0 status=0 verify=pass
+[12:25:10] W2 spm mc128 kc64 pc8 ways4 status=0 verify=pass
+[12:30:42] W2 blk mc128 kc128 pc8 ways0 status=0 verify=pass
+[12:32:24] W2 spm mc128 kc128 pc8 ways4 status=0 verify=pass
+[12:38:58] W2 spm mc128 kc256 pc8 ways4 status=0 verify=pass
+[12:41:03] W2 blk mc128 kc256 pc8 ways0 status=0 verify=pass
+[12:50:36] W2 blk mc256 kc64 pc8 ways0 status=0 verify=pass
+[12:51:02] W2 spm mc256 kc64 pc8 ways4 status=0 verify=pass
+[12:58:57] W2 spm mc256 kc128 pc8 ways4 status=0 verify=pass
+[13:01:25] W2 blk mc256 kc128 pc8 ways0 status=0 verify=pass
+===== W3 M=256 K=2048 N=2048 grid-cols=4 =====
+[13:08:14] W2 spm mc256 kc256 pc8 ways4 status=0 verify=pass
+[13:09:18] W2 blk mc256 kc256 pc8 ways0 status=0 verify=pass
+[13:11:27] W3 blk mc128 kc64 pc4 ways0 status=0 verify=pass
+[13:11:37] W3 spm mc128 kc64 pc4 ways4 status=0 verify=pass
+[13:13:39] W3 spm mc128 kc128 pc4 ways4 status=0 verify=pass
+[13:14:37] W3 blk mc128 kc128 pc4 ways0 status=0 verify=pass
+[13:16:27] W3 spm mc128 kc256 pc4 ways4 status=0 verify=pass
+[13:16:50] W3 blk mc128 kc256 pc4 ways0 status=0 verify=pass
+[13:19:14] W3 spm mc256 kc64 pc4 ways4 status=0 verify=pass
+[13:19:46] W3 blk mc256 kc64 pc4 ways0 status=0 verify=pass
+[13:21:47] W3 spm mc256 kc128 pc4 ways4 status=0 verify=pass
+[13:22:28] W3 blk mc256 kc128 pc4 ways0 status=0 verify=pass
+===== W4 M=512 K=768 N=768 grid-cols=2 =====
+[13:24:22] W3 spm mc256 kc256 pc4 ways4 status=0 verify=pass
+[13:25:04] W3 blk mc256 kc256 pc4 ways0 status=0 verify=pass
+[13:25:20] W4 blk mc128 kc64 pc2 ways0 status=0 verify=pass
+[13:25:45] W4 spm mc128 kc64 pc2 ways4 status=0 verify=pass
+[13:26:18] W4 blk mc128 kc128 pc2 ways0 status=0 verify=pass
+[13:26:19] W4 spm mc128 kc128 pc2 ways4 status=0 verify=pass
+[13:26:50] W4 spm mc128 kc256 pc2 ways4 status=0 verify=pass
+[13:27:16] W4 blk mc128 kc256 pc2 ways0 status=0 verify=pass
+[13:27:47] W4 blk mc256 kc64 pc2 ways0 status=0 verify=pass
+[13:28:01] W4 spm mc256 kc64 pc2 ways4 status=0 verify=pass
+[13:28:38] W4 spm mc256 kc128 pc2 ways4 status=0 verify=pass
+[13:28:46] W4 blk mc256 kc128 pc2 ways0 status=0 verify=pass
+===== W5 M=2048 K=2048 N=2048 grid-cols=2 =====
+[13:29:20] W4 spm mc256 kc256 pc2 ways4 status=0 verify=pass
+[13:29:39] W4 blk mc256 kc256 pc2 ways0 status=0 verify=pass
+[13:50:57] W5 spm mc128 kc64 pc2 ways4 status=0 verify=pass
+[13:54:42] W5 blk mc128 kc64 pc2 ways0 status=0 verify=pass
+[14:10:25] W5 spm mc128 kc128 pc2 ways4 status=0 verify=pass
+[14:12:11] W5 blk mc128 kc128 pc2 ways0 status=0 verify=pass
+[14:25:24] W5 spm mc128 kc256 pc2 ways4 status=0 verify=pass
+[14:32:04] W5 blk mc128 kc256 pc2 ways0 status=0 verify=pass
+[14:54:16] W5 blk mc256 kc64 pc2 ways0 status=0 verify=pass
+[14:57:12] W5 spm mc256 kc64 pc2 ways4 status=1 verify=missing
+[15:14:59] W5 spm mc256 kc128 pc2 ways4 status=0 verify=pass
+[15:17:34] W5 blk mc256 kc128 pc2 ways0 status=0 verify=pass
+===== W6 M=2048 K=64 N=2048 grid-cols=2 =====
+[15:31:56] W5 spm mc256 kc256 pc2 ways4 status=0 verify=pass
+[15:32:59] W6 blk mc128 kc64 pc2 ways0 status=0 verify=pass
+[15:33:54] W6 spm mc128 kc64 pc2 ways4 status=0 verify=pass
+[15:35:01] W6 blk mc256 kc64 pc2 ways0 status=0 verify=pass
+===== W7 M=784 K=256 N=1024 grid-cols=2 =====
+[15:36:03] W6 spm mc256 kc64 pc2 ways4 status=0 verify=pass
+[15:36:43] W7 blk mc128 kc64 pc2 ways0 status=0 verify=pass
+[15:37:14] W7 spm mc128 kc64 pc2 ways4 status=0 verify=pass
+[15:37:32] W5 blk mc256 kc256 pc2 ways0 status=0 verify=pass
+[15:37:53] W7 blk mc128 kc128 pc2 ways0 status=0 verify=pass
+[15:38:01] W7 spm mc128 kc128 pc2 ways4 status=0 verify=pass
+[15:38:29] W7 spm mc128 kc256 pc2 ways4 status=0 verify=pass
+[15:38:33] W7 blk mc128 kc256 pc2 ways0 status=0 verify=pass
+[15:39:10] W7 spm mc256 kc64 pc2 ways4 status=0 verify=pass
+[15:39:14] W7 blk mc256 kc64 pc2 ways0 status=0 verify=pass
+[15:39:46] W7 spm mc256 kc128 pc2 ways4 status=0 verify=pass
+[15:39:50] W7 blk mc256 kc128 pc2 ways0 status=0 verify=pass
+[15:40:21] W7 spm mc256 kc256 pc2 ways4 status=0 verify=pass
+[15:40:29] W7 blk mc256 kc256 pc2 ways0 status=0 verify=pass
+[15:40:29] ACL FP16 W1-W7 SWEEP DONE

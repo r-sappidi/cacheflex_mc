@@ -23,11 +23,11 @@ def acc(r, c, nb):
 
 
 def bvec(c, mr, nb):
-    return mr * nb + c
+    return max(16, mr * nb) + c
 
 
 def areg(r, mr, nb):
-    return mr * nb + nb + r
+    return max(16, mr * nb) + nb + r
 
 
 def gen_kernel(name, mr, nb, variant):
@@ -49,7 +49,10 @@ def gen_kernel(name, mr, nb, variant):
             off = "" if c == 0 else f", #{c}, mul vl"
             L.append(f'        "ld1w {{z{z}.s}}, p7/z, [%[c{r}]{off}]\\n"')
     L.append('        "1:\\n"')
-    # B loads
+    # B loads. Use the same accumulator/B/A register layout as the hand-written
+    # kernels: C accumulators start at z0, B starts at z16 when possible, and A
+    # broadcasts follow B. This keeps the high-pressure steady-state loop close
+    # to the tuned handwritten kernels while still allowing shape generation.
     if variant == "spm":
         for c in range(nb):
             L.append(f'        "spm.ld1w z{bvec(c,mr,nb)}.s, p7/z, [%[b]]\\n"')
@@ -111,6 +114,7 @@ def gen_cpp(variant, mr, nb):
         stage = """            spm_dsb();
             for (int p = 0; p < opt.kc; ++p) {
                 const float *src = B + static_cast<std::size_t>(pc + p) * N + jc;
+                if (p + 2 < opt.kc) __builtin_prefetch(B + static_cast<std::size_t>(pc + p + 2) * N + jc, 0, 1);
                 const std::uint64_t dst =
                     spm_base + static_cast<std::uint64_t>(p) * kVecsPerRow * 64;
                 for (int l = 0; l < kVecsPerRow; ++l) {
@@ -130,7 +134,9 @@ def gen_cpp(variant, mr, nb):
         stage = """            float *pack = ensure_bpack(static_cast<std::size_t>(opt.kc) * kNc);
             for (int p = 0; p < opt.kc; ++p) {
                 const float *src = B + static_cast<std::size_t>(pc + p) * N + jc;
-                std::copy(src, src + kNc, pack + static_cast<std::size_t>(p) * kNc);
+                if (p + 2 < opt.kc) __builtin_prefetch(B + static_cast<std::size_t>(pc + p + 2) * N + jc, 0, 1);
+                std::memcpy(pack + static_cast<std::size_t>(p) * kNc, src,
+                            static_cast<std::size_t>(kNc) * sizeof(float));
             }
             const float *bpanel = pack;
             const std::uint64_t ldb = static_cast<std::uint64_t>(kNc) * sizeof(float);"""
@@ -211,7 +217,7 @@ struct AlignedFloats {{
     AlignedFloats(const AlignedFloats &) = delete;
     AlignedFloats &operator=(const AlignedFloats &) = delete;
 }};
-struct Shared {{ Options opt; AlignedFloats a, b, c; pthread_barrier_t barrier; int total_reps = 0; }};
+struct Shared {{ Options opt; AlignedFloats a, b, b_ref, c; pthread_barrier_t barrier; int total_reps = 0; }};
 struct WorkerArgs {{ Shared *shared = nullptr; int tid = 0; }};
 static int parse_int(const char *s, const char *nm, long mn) {{
     char *e = nullptr; errno = 0; long v = std::strtol(s, &e, 10);
@@ -329,7 +335,7 @@ static int verify_samples(const Shared &sh) {{
     for (int s = 0; s < opt.verify; ++s) {{
         int i = (s * 131 + 7) % opt.m, j = (s * 197 + 3) % opt.n; double ref = 0;
         for (int p = 0; p < opt.k; ++p)
-            ref += (double)sh.a.ptr[(std::size_t)i * opt.k + p] * (double)sh.b.ptr[(std::size_t)p * opt.n + j];
+            ref += (double)sh.a.ptr[(std::size_t)i * opt.k + p] * (double)sh.b_ref.ptr[(std::size_t)p * opt.n + j];
         ref *= sh.total_reps;
         double got = sh.c.ptr[(std::size_t)i * opt.n + j], tol = 1e-3 * std::max(1.0, std::fabs(ref));
         if (std::fabs(got - ref) > tol) {{ std::fprintf(stderr, "mismatch %d %d %f %f\n", i, j, got, ref); ++bad; }}
@@ -353,8 +359,10 @@ int main(int argc, char **argv) {{
     if (svcntw() != kSpmWords) {{ std::fprintf(stderr, "need VL=2048b\n"); return 1; }}
 #endif
     Shared sh{{opt, AlignedFloats((std::size_t)opt.m * opt.k), AlignedFloats((std::size_t)opt.k * opt.n),
-              AlignedFloats((std::size_t)opt.m * opt.n), {{}}, opt.warmup + opt.repeat}};
+              AlignedFloats((std::size_t)opt.k * opt.n), AlignedFloats((std::size_t)opt.m * opt.n),
+              {{}}, opt.warmup + opt.repeat}};
     init_tensor(sh.a.ptr, sh.a.count, 0.25f); init_tensor(sh.b.ptr, sh.b.count, 0.25f);
+    std::copy(sh.b.ptr, sh.b.ptr + sh.b.count, sh.b_ref.ptr);
     std::fill(sh.c.ptr, sh.c.ptr + sh.c.count, 0.0f);
     if (pthread_barrier_init(&sh.barrier, nullptr, (unsigned)opt.threads)) return 1;
     std::vector<pthread_t> threads((std::size_t)opt.threads - 1);
