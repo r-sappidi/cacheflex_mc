@@ -283,7 +283,8 @@ RubyPort::MemResponsePort::recvTimingReq(PacketPtr pkt)
     // Check for pio requests and directly send them to the dedicated
     // pio port.
     if (pkt->cmd != MemCmd::MemSyncReq && !pkt->req->hasNoAddr()) {
-        if (!pkt->req->isMemMgmt() && !isPhysMemAddress(pkt)) {
+        if (!pkt->req->isMemMgmt() && !pkt->req->isSPMRequest() &&
+            !isPhysMemAddress(pkt)) {
             assert(owner.memRequestPort.isConnected());
             DPRINTF(RubyPort, "Request address %#x assumed to be a "
                     "pio address\n", pkt->getAddr());
@@ -353,7 +354,7 @@ RubyPort::MemResponsePort::recvAtomic(PacketPtr pkt)
     // Check for pio requests and directly send them to the dedicated
     // pio port.
     if (pkt->cmd != MemCmd::MemSyncReq) {
-        if (!isPhysMemAddress(pkt)) {
+        if (!pkt->req->isSPMRequest() && !isPhysMemAddress(pkt)) {
             assert(owner.memRequestPort.isConnected());
             DPRINTF(RubyPort, "Request address %#x assumed to be a "
                     "pio address\n", pkt->getAddr());
@@ -488,7 +489,8 @@ RubyPort::ruby_hit_callback(PacketPtr pkt)
 
     // The packet was destined for memory and has not yet been turned
     // into a response
-    assert(system->isMemAddr(pkt->getAddr()) ||
+    assert(pkt->req->isSPMRequest() ||
+        system->isMemAddr(pkt->getAddr()) ||
         system->isDeviceMemAddr(pkt) ||
         pkt->req->hasNoAddr());
     assert(pkt->isRequest());
@@ -646,7 +648,7 @@ RubyPort::MemResponsePort::hitCallback(PacketPtr pkt)
     }
 
     // Flush, acquire, release requests don't access physical memory
-    if (pkt->isFlush() || pkt->cmd == MemCmd::MemSyncReq
+    if (pkt->req->isSPMRequest() || pkt->isFlush() || pkt->cmd == MemCmd::MemSyncReq
         || pkt->cmd == MemCmd::WriteCompleteResp || pkt->req->hasNoAddr()) {
         accessPhysMem = false;
     }

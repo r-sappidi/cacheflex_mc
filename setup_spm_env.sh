@@ -19,16 +19,18 @@ if [ -z "${M5OP_OBJ:-}" ]; then
 fi
 
 if [ -z "${CROSS_CXX:-}" ]; then
-    if command -v aarch64-none-linux-gnu-g++ >/dev/null 2>&1; then
-        export CROSS_CXX=aarch64-none-linux-gnu-g++
-    elif command -v aarch64-linux-gnu-g++ >/dev/null 2>&1; then
-        export CROSS_CXX=aarch64-linux-gnu-g++
+    if [ -x "$CACHEFLEX_MC_ROOT/tools/arm-gnu-toolchain-11.3.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++" ]; then
+        export CROSS_CXX="$CACHEFLEX_MC_ROOT/tools/arm-gnu-toolchain-11.3.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++"
     elif [ -x "$CACHEFLEX_MC_ROOT/tools/arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++" ]; then
         export CROSS_CXX="$CACHEFLEX_MC_ROOT/tools/arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++"
     elif [ -x "$CACHEFLEX_MC_ROOT/../cacheflex_micro/tools/arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++" ]; then
         export CROSS_CXX="$CACHEFLEX_MC_ROOT/../cacheflex_micro/tools/arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++"
     elif [ -x "$CACHEFLEX_MC_ROOT/../AraXL_fpga/toolchains/arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++" ]; then
         export CROSS_CXX="$CACHEFLEX_MC_ROOT/../AraXL_fpga/toolchains/arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++"
+    elif command -v aarch64-none-linux-gnu-g++ >/dev/null 2>&1; then
+        export CROSS_CXX=aarch64-none-linux-gnu-g++
+    elif command -v aarch64-linux-gnu-g++ >/dev/null 2>&1; then
+        export CROSS_CXX=aarch64-linux-gnu-g++
     else
         export CROSS_CXX=aarch64-none-linux-gnu-g++
     fi

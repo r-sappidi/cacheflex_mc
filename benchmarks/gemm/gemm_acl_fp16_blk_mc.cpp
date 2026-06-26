@@ -218,7 +218,12 @@ static void *worker_entry(void *raw) {
     if (sh.opt.pin) pin_worker(args->tid);
     prepare_tile(sh, args->tid);
     for (int rep = 0; rep < sh.total_reps; ++rep) {
-        pthread_barrier_wait(&sh.barrier);
+        if (rep == sh.opt.warmup) {
+            pthread_barrier_wait(&sh.barrier);
+            pthread_barrier_wait(&sh.barrier);
+        } else {
+            pthread_barrier_wait(&sh.barrier);
+        }
         run_tile(sh, sh.tiles[args->tid]);
         pthread_barrier_wait(&sh.barrier);
     }
@@ -276,8 +281,13 @@ int main(int argc, char **argv) {
     if (opt.pin) pin_worker(0);
     prepare_tile(sh, 0);
     for (int rep = 0; rep < sh.total_reps; ++rep) {
-        if (rep == opt.warmup) roi_begin();
-        pthread_barrier_wait(&sh.barrier);
+        if (rep == opt.warmup) {
+            pthread_barrier_wait(&sh.barrier);
+            roi_begin();
+            pthread_barrier_wait(&sh.barrier);
+        } else {
+            pthread_barrier_wait(&sh.barrier);
+        }
         run_tile(sh, sh.tiles[0]);
         pthread_barrier_wait(&sh.barrier);
     }

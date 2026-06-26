@@ -38,3 +38,9 @@ MAVBench/
 *.bak
 cacheflex_rebuttal.pdf
 /0
+
+# External source dependency fetched by benchmarks/gemm/build_acl_library.sh
+/third_party/ComputeLibrary/
+
+# Local downloaded toolchains; setup_spm_env.sh can use these when present.
+/tools/

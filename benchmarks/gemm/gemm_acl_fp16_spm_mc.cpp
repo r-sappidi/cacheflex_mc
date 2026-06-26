@@ -183,7 +183,7 @@ static void run_tile(const Shared &sh, Tile &t) {
     const std::size_t ntiles = (N + NT - 1) / NT;
     const __fp16 *A = sh.a.ptr + static_cast<std::size_t>(t.row0) * K;
 
-#if defined(VL_2) || defined(VL_4)
+#if defined(VL_1) || defined(VL_2) || defined(VL_4)
     const std::size_t SPM_KC_FACTOR = 1;
 #elif defined(VL_8)
     const std::size_t SPM_KC_FACTOR = 2;
@@ -264,7 +264,12 @@ static void *worker_entry(void *raw) {
     if (sh.opt.pin) pin_worker(args->tid);
     prepare_tile(sh, args->tid);
     for (int rep = 0; rep < sh.total_reps; ++rep) {
-        pthread_barrier_wait(&sh.barrier);
+        if (rep == sh.opt.warmup) {
+            pthread_barrier_wait(&sh.barrier);
+            pthread_barrier_wait(&sh.barrier);
+        } else {
+            pthread_barrier_wait(&sh.barrier);
+        }
         run_tile(sh, sh.tiles[args->tid]);
         pthread_barrier_wait(&sh.barrier);
     }
@@ -307,6 +312,39 @@ static int verify_samples(const Shared &sh) {
 
 int main(int argc, char **argv) {
     Options opt = parse_args(argc, argv);
+    const int runtime_vlh = static_cast<int>(svcnth());
+    const int panels = (opt.n + 3 * runtime_vlh - 1) / (3 * runtime_vlh);
+#if defined(VL_1)
+    constexpr int kExpectedVlh = 8;
+    constexpr int kSpmKcFactor = 1;
+#elif defined(VL_2)
+    constexpr int kExpectedVlh = 16;
+    constexpr int kSpmKcFactor = 1;
+#elif defined(VL_4)
+    constexpr int kExpectedVlh = 32;
+    constexpr int kSpmKcFactor = 1;
+#elif defined(VL_8)
+    constexpr int kExpectedVlh = 64;
+    constexpr int kSpmKcFactor = 2;
+#elif defined(VL_16)
+    constexpr int kExpectedVlh = 128;
+    constexpr int kSpmKcFactor = 3;
+#else
+#error "Unsupported SPM VL"
+#endif
+    if (runtime_vlh != kExpectedVlh) {
+        std::fprintf(stderr, "SPM binary was built for svcnth=%d, got svcnth=%d\n",
+                     kExpectedVlh, runtime_vlh);
+        return 2;
+    }
+    if (static_cast<std::size_t>(opt.kc) * kSpmKcFactor > 1024) {
+        std::fprintf(stderr, "kc=%d exceeds SPM set capacity for this VL path\n", opt.kc);
+        return 2;
+    }
+    if (opt.grid_cols_override > panels) {
+        std::fprintf(stderr, "grid-cols=%d exceeds N-panel count=%d\n", opt.grid_cols_override, panels);
+        return 2;
+    }
     Shared sh{opt, Halfs(static_cast<std::size_t>(opt.m) * opt.k),
               Halfs(static_cast<std::size_t>(opt.k) * opt.n), {}, opt.warmup + opt.repeat,
               std::vector<Tile>(static_cast<std::size_t>(opt.threads))};
@@ -322,8 +360,13 @@ int main(int argc, char **argv) {
     if (opt.pin) pin_worker(0);
     prepare_tile(sh, 0);
     for (int rep = 0; rep < sh.total_reps; ++rep) {
-        if (rep == opt.warmup) roi_begin();
-        pthread_barrier_wait(&sh.barrier);
+        if (rep == opt.warmup) {
+            pthread_barrier_wait(&sh.barrier);
+            roi_begin();
+            pthread_barrier_wait(&sh.barrier);
+        } else {
+            pthread_barrier_wait(&sh.barrier);
+        }
         run_tile(sh, sh.tiles[0]);
         pthread_barrier_wait(&sh.barrier);
     }
@@ -331,7 +374,6 @@ int main(int argc, char **argv) {
     for (pthread_t t : threads) pthread_join(t, nullptr);
     pthread_barrier_destroy(&sh.barrier);
     int bad = opt.verify ? verify_samples(sh) : 0;
-    int panels = (opt.n + static_cast<int>(3 * svcnth()) - 1) / static_cast<int>(3 * svcnth());
     int PC = opt.grid_cols_override > 0 ? opt.grid_cols_override : grid_cols(opt.threads, panels);
     std::printf("gemm_acl_fp16_spm_mc threads=%d grid=%dx%d mc=%d kc=%d nt=%zu m=%d k=%d n=%d verify=%s checksum=%.9f\n",
                 opt.threads, opt.threads / PC, PC, opt.mc, opt.kc, 3 * svcnth(), opt.m, opt.k, opt.n,
