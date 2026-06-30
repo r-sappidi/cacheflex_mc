@@ -10,6 +10,6 @@ I = NP,no copy in LLC
 S,"shared, LLC has data + sharer list (SS)"
 E / M,"line owned by a local L1 (MT); E=clean, M=dirty owner"
 SD,"MT_SPMS: silent GetS forwarded to the owner, awaiting the owner's Unblock"
-SPM_PutS/PutE/PutM,an L1 relinquishing its coherent copy to claim its SPM slot (clears the SPM owner; line stays cached in the LLC)
+SPM_PutS/PutE/PutM,implemented L2 compatibility path for an L1 relinquishing a coherent source while claiming SPM. The current normal L1 SPMCP_fetch path is copy/snapshot and does not issue these puts for local S/E/M sources; local sources remain coherent as SS/EE/MM after the SPM copy is installed
 GetS_silent,snapshot fetch for an L1 SPMCP_fetch; the requester is never added as a sharer (the line leaves the coherence domain)
 SPMWB_Req,SPM dirty-slot writeback; data goes to memory via SPM_WB before the L1 is acked
