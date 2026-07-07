@@ -86,6 +86,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     IM, AccessPermission:Busy, desc="L2 idle, got L1_GETX, issued memory fetch, have not seen response(s) yet";
     SPM_IS, AccessPermission:Busy, desc="L2 got SPM GETS_SILENT miss, issued memory fetch";
     SPM_WB, AccessPermission:Busy, desc="L2 forwarded SPM writeback to memory";
+    SPM_WB_INV, AccessPermission:Busy, desc="SPM writeback invalidating coherent sharers/owner before overwriting (F5)";
 
     // Blocking states
     SS_MB, AccessPermission:Busy, desc="Blocked for L1_GETX from SS";
@@ -171,6 +172,8 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     MachineID L1_GetX_ID,          desc="ID of the L1 cache to forward the block to once we get a response";
     int pendingAcks,            desc="number of pending acks for invalidates during writeback";
     Addr DstSPMAddr, default="0", desc="SPM slot address for response routing";
+    Addr SrcAddr, default="0", desc="SPM writeback coherent source address (F5 deferred forward)";
+    int Len, default="0", desc="SPM writeback length (F5 deferred forward)";
   }
 
   structure(TBETable, external="yes") {
@@ -886,6 +889,54 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     }
   }
 
+  // F5: allocate the SPM-writeback TBE AND record how many coherent copies we
+  // must invalidate before overwriting (Sharers.count()), stashing the SPM
+  // data / routing info for the deferred write + memory forward.
+  action(swb_allocateInvTBE, "swbi", desc="Allocate SPM writeback TBE and set pending inv acks") {
+    peek(L1RequestL2Network_in, RequestMsg) {
+      check_allocate(TBEs);
+      assert(is_valid(cache_entry));
+      TBEs.allocate(address);
+      set_tbe(TBEs[address]);
+      tbe.addr := address;
+      tbe.DataBlk := in_msg.DataBlk;
+      tbe.Dirty := in_msg.Dirty;
+      tbe.Requestor := in_msg.Requestor;
+      tbe.DstSPMAddr := in_msg.DstSPMAddr;
+      tbe.SrcAddr := in_msg.SrcAddr;
+      tbe.Len := in_msg.Len;
+      tbe.L1_GetS_IDs.clear();
+      tbe.pendingAcks := cache_entry.Sharers.count();
+    }
+  }
+
+  // F5: once all coherent copies are invalidated, the SPM value (held in the
+  // TBE) becomes L2's authoritative data.
+  action(swb_writeDataFromTBE, "swbw", desc="Write buffered SPM data into L2 cache") {
+    assert(is_valid(tbe));
+    assert(is_valid(cache_entry));
+    cache_entry.DataBlk := tbe.DataBlk;
+    cache_entry.Dirty := true;
+  }
+
+  // F5: forward the (now safely exclusive) SPM writeback to memory, from the
+  // TBE rather than the long-popped request.
+  action(swb_issueSPMWBFromTBE, "swbf", desc="Forward buffered SPM writeback to memory") {
+    assert(is_valid(tbe));
+    enqueue(DirRequestL2Network_out, RequestMsg, l2_request_latency) {
+      out_msg.addr := tbe.addr;
+      out_msg.SrcAddr := tbe.SrcAddr;
+      out_msg.DstSPMAddr := tbe.DstSPMAddr;
+      out_msg.Len := tbe.Len;
+      out_msg.Type := CoherenceRequestType:SPMWB_REQ;
+      out_msg.Requestor := machineID;
+      out_msg.Destination.add(mapAddressToMachine(tbe.addr, MachineType:Directory));
+      out_msg.DataBlk := tbe.DataBlk;
+      out_msg.Dirty := true;
+      out_msg.MessageSize := MessageSizeType:Writeback_Data;
+    }
+  }
+
   action(spwa_sendSPMWBAckToL1, "spwa", desc="Send SPM writeback ack to original L1") {
     enqueue(responseL2Network_out, ResponseMsg, to_l1_latency) {
       assert(is_valid(tbe));
@@ -1071,21 +1122,32 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   // BASE STATE - I
 
   // Transitions from I (Idle)
-  transition({NP, IS, ISS, IM, SS, M, M_I, I_I, S_I, MT_IB, MT_SB}, L1_PUTX) {
+  // F4 fix: SPM_IS added -- a stale PUTX arriving during a silent memory fill
+  // is acknowledged just like the ordinary IS/ISS fill transients (previously
+  // undefined -> panic).
+  transition({NP, IS, ISS, IM, SS, M, M_I, I_I, S_I, MT_IB, MT_SB, SPM_IS}, L1_PUTX) {
     t_sendWBAck;
     jj_popL1RequestQueue;
   }
 
-  transition({NP, SS, M, MT, M_I, I_I, S_I, IS, ISS, IM, MT_IB, MT_SB}, L1_PUTX_old) {
+  transition({NP, SS, M, MT, M_I, I_I, S_I, IS, ISS, IM, MT_IB, MT_SB, SPM_IS}, L1_PUTX_old) {
     t_sendWBAck;
     jj_popL1RequestQueue;
   }
 
-  transition({IM, IS, ISS, SPM_IS, SPM_WB, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS}, {L2_Replacement, L2_Replacement_clean, Flush, Flush_Data, Flush_NP, Flush_Clean, Flush_NP_Clean, Flush_Data_Clean}) {
+  // F3 fix: an owner PUTX racing another core's SPMWB_REQ arrives while L2 is
+  // forwarding the writeback (SPM_WB / SPM_WB_INV), where PUTX was undefined
+  // -> panic.  Stall it until the SPM writeback drains (SPM_WB -> M), then it
+  // is handled in M.
+  transition({SPM_WB, SPM_WB_INV}, {L1_PUTX, L1_PUTX_old}) {
     zz_stallAndWaitL1RequestQueue;
   }
 
-  transition({IM, IS, ISS, SPM_IS, SPM_WB, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS}, MEM_Inv) {
+  transition({IM, IS, ISS, SPM_IS, SPM_WB, SPM_WB_INV, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS}, {L2_Replacement, L2_Replacement_clean, Flush, Flush_Data, Flush_NP, Flush_Clean, Flush_NP_Clean, Flush_Data_Clean}) {
+    zz_stallAndWaitL1RequestQueue;
+  }
+
+  transition({IM, IS, ISS, SPM_IS, SPM_WB, SPM_WB_INV, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS}, MEM_Inv) {
     zn_recycleResponseNetwork;
   }
 
@@ -1094,7 +1156,14 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   }
 
 
-  transition({SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS}, {L1_GETS, L1_GET_INSTR, L1_GETX, L1_UPGRADE, SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE, SPMWB_REQ}) {
+  transition({SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS},
+             {L1_GETS, L1_GET_INSTR, L1_GETX, L1_UPGRADE,
+              SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE,
+              SPMWB_REQ}) {
+    zz_stallAndWaitL1RequestQueue;
+  }
+
+  transition(MT_SPMS, {L1_PUTX, L1_PUTX_old}) {
     zz_stallAndWaitL1RequestQueue;
   }
 
@@ -1103,6 +1172,18 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   // added as a sharer and the line stays Modified in the owner (MT).
   transition(MT_SPMS, Unblock, MT) {
     k_popUnblockQueue;
+    kd_wakeUpDependents;
+  }
+
+  // F6 fix: a DYING owner (L1 was in M_I, mid-writeback) serves the silent
+  // snapshot but hands its data back instead of a bare Unblock, because it is
+  // leaving the coherence domain.  Pull the line back into L2 (-> M, owner
+  // cleared) so no phantom owner remains for a later request to be forwarded
+  // to (which previously panicked/deadlocked in the owner's SINK_WB_ACK).
+  transition(MT_SPMS, {WB_Data, WB_Data_clean}, M) {
+    m_writeDataToCache;
+    spc_clearSPMOwner;
+    o_popIncomingResponseQueue;
     kd_wakeUpDependents;
   }
 
@@ -1190,7 +1271,10 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     o_popIncomingResponseQueue;
   }
 
-  transition({IS, ISS}, {SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE, SPMWB_REQ}) {
+  // F1 fix: IM added -- a store's outstanding memory GETX (L2 in IM) racing
+  // another core's SPM_GETS_SILENT / SPMWB_REQ to the same line was undefined
+  // -> panic.  Stall the SPM op until the fetch resolves, exactly as IS/ISS do.
+  transition({IS, ISS, IM}, {SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE, SPMWB_REQ}) {
     zz_stallAndWaitL1RequestQueue;
   }
 
@@ -1386,13 +1470,39 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     jj_popL1RequestQueue;
   }
 
-  transition({NP, SS, M, MT}, SPMWB_REQ, SPM_WB) {
+  // NP/M: no coherent L1 copies exist (NP = not present; M = data in L2, no
+  // L1 owner), so the SPM writeback can overwrite directly and forward.
+  transition({NP, M}, SPMWB_REQ, SPM_WB) {
     qq_allocateL2CacheBlock;
     spc_clearSPMOwner;
     mr_writeDataToCacheFromRequest;
     si_allocateSPMTBE;
     spw_issueSPMWBToMemory;
     jj_popL1RequestQueue;
+  }
+
+  // F5 fix: SS/MT have live coherent L1 copies.  spc_clearSPMOwner previously
+  // wiped the directory's sharer/owner list WITHOUT invalidating those copies
+  // -> SWMR violation + a stranded sharer's later UPGRADE getting DATA in SM
+  // (panic).  Instead invalidate the sharers/owner first, collect their acks
+  // (owner data, if any, is discarded -- the SPM value wins), then overwrite
+  // and forward to memory.
+  transition({SS, MT}, SPMWB_REQ, SPM_WB_INV) {
+    swb_allocateInvTBE;
+    f_sendInvToSharers;
+    jj_popL1RequestQueue;
+  }
+
+  transition(SPM_WB_INV, Ack) {
+    q_updateAck;
+    o_popIncomingResponseQueue;
+  }
+
+  transition(SPM_WB_INV, {Ack_all, WB_Data, WB_Data_clean}, SPM_WB) {
+    swb_writeDataFromTBE;
+    spc_clearSPMOwner;
+    swb_issueSPMWBFromTBE;
+    o_popIncomingResponseQueue;
   }
 
   transition(SPM_WB, SPMWB_Ack, M) {
@@ -1436,7 +1546,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   }
 
   // writeback states
-  transition({I_I, S_I, MT_I, MCT_I, M_I, SPM_WB}, {L1_GETX, L1_UPGRADE, L1_GETS, L1_GET_INSTR, SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE, SPMWB_REQ}) {
+  transition({I_I, S_I, MT_I, MCT_I, M_I, SPM_WB, SPM_WB_INV}, {L1_GETX, L1_UPGRADE, L1_GETS, L1_GET_INSTR, SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE, SPMWB_REQ}) {
     zz_stallAndWaitL1RequestQueue;
   }
 

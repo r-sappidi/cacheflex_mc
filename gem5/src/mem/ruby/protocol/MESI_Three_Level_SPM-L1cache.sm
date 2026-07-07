@@ -43,7 +43,11 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
    int l2_select_num_bits;
    Cycles l1_request_latency := 2;
    Cycles l1_response_latency := 2;
-   // Models the private-L2 SPM array access plus return to Ruby L0.
+   // Pure spm_ld/spm_st accesses model the paper's dedicated private-L2 SPM
+   // datapath: physical way/slot addressing with no tag/TLB/coherence lookup.
+   // Bridge/control operations keep the original response latency because they
+   // still coordinate with the coherent cache pipeline.
+   Cycles spm_access_response_latency := 1;
    Cycles spm_response_latency := 6;
    Cycles to_l2_latency := 1;
 
@@ -56,6 +60,9 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
    // From the L0 cache to the L1 cache
    MessageBuffer * bufferFromL0, network="From";
+
+   // Dedicated pure-SPM request path from the private L0 controller.
+   MessageBuffer * spmBufferFromL0, network="From";
 
    // Message queue from this L1 cache TO the network / L2
    MessageBuffer * requestToL2, network="To", virtual_network="0",
@@ -164,6 +171,11 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     Flush_Ack,  desc="Flush ack from L1";
     External_Flush_Data, desc="Send flush data to L2";
     External_Flush_Data_Ack, desc="Flush data received from L1";
+
+    // Pure SPM requests arriving on the dedicated L0->private-L1 SPM path.
+    SPMLD_direct,       desc="Direct SPM load request";
+    SPMST_direct,       desc="Direct SPM store request";
+    SPMWB_read_direct,  desc="Direct SPM writeback source read request";
 
     SPMCP_fetch, desc="Copy coherent source line into private-L1 SPM";
     SPMCP_install, desc="Claim private-L1 SPM slot";
@@ -507,6 +519,30 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
                     }
                 }
             }
+        }
+      }
+    }
+  }
+
+  // Pure SPM requests from L0 use a dedicated path.  These requests target
+  // private-L2 SPM slots directly and do not participate in coherent cache
+  // lookup/replacement traffic.  They are intentionally separated from
+  // bufferFromL0 so a low-latency SPM request cannot violate the FIFO ordering
+  // of older regular cache requests.
+  in_port(spmBufferFromL0_in, CoherenceMsg, spmBufferFromL0, rank = 0) {
+    if (spmBufferFromL0_in.isReady(clockEdge())) {
+      peek(spmBufferFromL0_in, CoherenceMsg) {
+        Entry cache_entry := getCacheEntry(in_msg.addr);
+        TBE tbe := TBEs[in_msg.addr];
+
+        if (in_msg.Class == CoherenceClass:SPM_LD) {
+          trigger(Event:SPMLD_direct, in_msg.addr, cache_entry, tbe);
+        } else if (in_msg.Class == CoherenceClass:SPM_ST) {
+          trigger(Event:SPMST_direct, in_msg.addr, cache_entry, tbe);
+        } else if (in_msg.Class == CoherenceClass:SPMWB_READ) {
+          trigger(Event:SPMWB_read_direct, in_msg.addr, cache_entry, tbe);
+        } else {
+          error("Invalid request on direct SPM L0->L1 buffer");
         }
       }
     }
@@ -1071,14 +1107,30 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
   action(spm_readHitToL0, "sprh", desc="Return SPM data to L0") {
     peek(messageBufferFromL0_in, CoherenceMsg) {
-    enqueue(spmBufferToL0_out, CoherenceMsg, spm_response_latency) {
+    enqueue(spmBufferToL0_out, CoherenceMsg, spm_access_response_latency) {
       assert(is_valid(cache_entry));
       assert(cache_entry.isScratchpad());
       out_msg.addr := address;
       out_msg.Class := CoherenceClass:SPM_DATA;
       out_msg.Sender := machineID;
       out_msg.Dest := createMachineID(MachineType:L0Cache, version);
-      out_msg.DataBlk := cache.readSPMData(address, in_msg.Len);
+      out_msg.DataBlk := cache.readSPMData(in_msg.DstSPMAddr, in_msg.Len);
+      out_msg.Len := in_msg.Len;
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+    }
+  }
+
+  action(spm_readHitToL0_direct, "sprhd", desc="Return SPM data to L0 from direct SPM request path") {
+    peek(spmBufferFromL0_in, CoherenceMsg) {
+    enqueue(spmBufferToL0_out, CoherenceMsg, spm_access_response_latency) {
+      assert(is_valid(cache_entry));
+      assert(cache_entry.isScratchpad());
+      out_msg.addr := address;
+      out_msg.Class := CoherenceClass:SPM_DATA;
+      out_msg.Sender := machineID;
+      out_msg.Dest := createMachineID(MachineType:L0Cache, version);
+      out_msg.DataBlk := cache.readSPMData(in_msg.DstSPMAddr, in_msg.Len);
       out_msg.Len := in_msg.Len;
       out_msg.MessageSize := MessageSizeType:Response_Data;
     }
@@ -1087,12 +1139,26 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
   action(spm_readZeroToL0, "sprz", desc="Return zero for absent/non-SPM SPM read") {
     peek(messageBufferFromL0_in, CoherenceMsg) {
-    enqueue(spmBufferToL0_out, CoherenceMsg, spm_response_latency) {
+    enqueue(spmBufferToL0_out, CoherenceMsg, spm_access_response_latency) {
       out_msg.addr := address;
       out_msg.Class := CoherenceClass:SPM_DATA;
       out_msg.Sender := machineID;
       out_msg.Dest := createMachineID(MachineType:L0Cache, version);
-      out_msg.DataBlk := cache.readSPMData(address, in_msg.Len);
+      out_msg.DataBlk := cache.readSPMData(in_msg.DstSPMAddr, in_msg.Len);
+      out_msg.Len := in_msg.Len;
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+    }
+  }
+
+  action(spm_readZeroToL0_direct, "sprzd", desc="Return zero for absent/non-SPM direct SPM read") {
+    peek(spmBufferFromL0_in, CoherenceMsg) {
+    enqueue(spmBufferToL0_out, CoherenceMsg, spm_access_response_latency) {
+      out_msg.addr := address;
+      out_msg.Class := CoherenceClass:SPM_DATA;
+      out_msg.Sender := machineID;
+      out_msg.Dest := createMachineID(MachineType:L0Cache, version);
+      out_msg.DataBlk := cache.readSPMData(in_msg.DstSPMAddr, in_msg.Len);
       out_msg.Len := in_msg.Len;
       out_msg.MessageSize := MessageSizeType:Response_Data;
     }
@@ -1111,11 +1177,44 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     }
   }
 
+  action(spm_accessAckToL0, "spaa", desc="Ack pure SPM write through direct SPM datapath") {
+    spmZeroData.clear();
+    enqueue(spmBufferToL0_out, CoherenceMsg, spm_access_response_latency) {
+      out_msg.addr := address;
+      out_msg.Class := CoherenceClass:SPM_ACK;
+      out_msg.Sender := machineID;
+      out_msg.Dest := createMachineID(MachineType:L0Cache, version);
+      out_msg.DataBlk := spmZeroData;
+      out_msg.MessageSize := MessageSizeType:Response_Control;
+    }
+  }
+
+  action(spm_accessAckToL0_direct, "spaad", desc="Ack direct-path pure SPM write") {
+    spmZeroData.clear();
+    enqueue(spmBufferToL0_out, CoherenceMsg, spm_access_response_latency) {
+      out_msg.addr := address;
+      out_msg.Class := CoherenceClass:SPM_ACK;
+      out_msg.Sender := machineID;
+      out_msg.Dest := createMachineID(MachineType:L0Cache, version);
+      out_msg.DataBlk := spmZeroData;
+      out_msg.MessageSize := MessageSizeType:Response_Control;
+    }
+  }
+
   action(spm_storeHit, "spsh", desc="Update SPM data from L0 request") {
     peek(messageBufferFromL0_in, CoherenceMsg) {
       assert(is_valid(cache_entry));
       assert(cache_entry.isScratchpad());
-      cache_entry.DataBlk := in_msg.DataBlk;
+      cache.writeSPMData(in_msg.DstSPMAddr, in_msg.DataBlk, in_msg.Len);
+      cache_entry.Dirty := true;
+    }
+  }
+
+  action(spm_storeHit_direct, "spshd", desc="Update SPM data from direct SPM request path") {
+    peek(spmBufferFromL0_in, CoherenceMsg) {
+      assert(is_valid(cache_entry));
+      assert(cache_entry.isScratchpad());
+      cache.writeSPMData(in_msg.DstSPMAddr, in_msg.DataBlk, in_msg.Len);
       cache_entry.Dirty := true;
     }
   }
@@ -1150,6 +1249,10 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
   action(k_popL0RequestQueue, "k", desc="Pop mandatory queue.") {
     messageBufferFromL0_in.dequeue(clockEdge());
+  }
+
+  action(k_spmPopL0RequestQueue, "kspm", desc="Pop direct SPM L0 request queue.") {
+    spmBufferFromL0_in.dequeue(clockEdge());
   }
 
   action(l_popL2RequestQueue, "l",
@@ -1225,6 +1328,10 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     stall_and_wait(messageBufferFromL0_in, address);
   }
 
+  action(z0_spmStallAndWaitL0Queue, "\z0s", desc="recycle direct SPM L0 request queue") {
+    stall_and_wait(spmBufferFromL0_in, address);
+  }
+
   action(z2_stallAndWaitL2Queue, "\z2", desc="recycle L2 request queue") {
     stall_and_wait(requestNetwork_in, address);
   }
@@ -1257,9 +1364,25 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     z0_stallAndWaitL0Queue;
   }
 
-  transition({SX_L0, MX_L0, EX_L0, SX_A, IX_D, XWB},
+  transition({SX_L0, MX_L0, EX_L0, SX_A, XWB},
              {Fwd_GETS, Fwd_GETX, Inv}) {
     z2_stallAndWaitL2Queue;
+  }
+
+  // IX_D still stalls forwarded GETS/GETX (it holds no coherent copy, so these
+  // should not target it, but stalling is safe).
+  transition(IX_D, {Fwd_GETS, Fwd_GETX}) {
+    z2_stallAndWaitL2Queue;
+  }
+
+  // F8 fix: in IX_D this core holds NO coherent copy of the source line (it is
+  // fetching a snapshot into SPM), but it may still be a STALE L2 sharer from a
+  // prior silent SS->I drop.  An Inv from another core's UPGRADE must be
+  // acknowledged immediately -- stalling it deadlocks, because the UPGRADE's L2
+  // is parked in SS_MB while this core's own GETS_SILENT is queued behind it.
+  transition(IX_D, Inv) {
+    fi_sendInvAck;
+    l_popL2RequestQueue;
   }
 
   // A core mid-SPMCP_fetch that still holds the coherent line (MX_A/EX_A) can
@@ -1290,9 +1413,15 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     l_popL2RequestQueue;
   }
 
+  // F6 fix: a DYING owner (M_I, mid-writeback) can serve the silent snapshot
+  // from its writeback TBE, but it is LEAVING the coherence domain -- it must
+  // not send a bare Unblock (which tells L2 "owner keeps the line" and leaves
+  // L2 in MT pointing at a dead owner -> later forwarded request panics/
+  // deadlocks).  Instead hand the data to L2 so L2 pulls the line back to M
+  // (MT_SPMS + WB_Data -> M), leaving no phantom owner.
   transition(M_I, Fwd_GETS_Silent, SINK_WB_ACK) {
     spm_sendSilentDataToRequestor_fromTBE;
-    j_sendUnblock;
+    d2t_sendDataToL2_fromTBE;
     l_popL2RequestQueue;
   }
 
@@ -1311,17 +1440,27 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     z0_stallAndWaitL0Queue;
   }
 
+  transition({IS, IM, IS_I, M_I, SM, SINK_WB_ACK, S_IL0, M_IL0, E_IL0,
+              MM_IL0, I_F, V_F, D_F, IX_D, SX_L0, MX_L0, EX_L0,
+              SX_A, MX_A, EX_A, XWB},
+             {SPMLD_direct, SPMST_direct, SPMWB_read_direct}) {
+    z0_spmStallAndWaitL0Queue;
+  }
+
   transition(I, SPMCP_fetch, IX_D) {
     spm_allocateTBE;
     spm_issueGETSSilent;
     k_popL0RequestQueue;
   }
 
-  transition(S, SPMCP_fetch, S) {
+  // SPMCP is a coherent-source snapshot operation.  If this L1 state says the
+  // line may also be present in the private L0, recall L0 before installing the
+  // SPM slot so the snapshot observes the issuing core's freshest private
+  // value.  Copying directly from L1 here is unsafe after local writes have not
+  // yet been reflected into the L1 DataBlk.
+  transition(S, SPMCP_fetch, SX_L0) {
     spm_allocateTBE;
-    spm_installFromCache;
-    spm_ackToL0;
-    s_deallocateTBE;
+    forward_eviction_to_L0_own;
     k_popL0RequestQueue;
   }
 
@@ -1333,11 +1472,9 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     k_popL0RequestQueue;
   }
 
-  transition(E, SPMCP_fetch, E) {
+  transition(E, SPMCP_fetch, EX_L0) {
     spm_allocateTBE;
-    spm_installFromCache;
-    spm_ackToL0;
-    s_deallocateTBE;
+    forward_eviction_to_L0_own;
     k_popL0RequestQueue;
   }
 
@@ -1371,12 +1508,45 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     kd_wakeUpDependents;
   }
 
+  transition(SX_L0, {L0_DataAck, L0_DataCopy}, SS) {
+    u_writeDataFromL0Response;
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
+    k_popL0RequestQueue;
+    kd_wakeUpDependents;
+  }
+
   transition(EX_L0, L0_Ack, EE) {
     spm_installFromCache;
     spm_ackToL0;
     s_deallocateTBE;
     k_popL0RequestQueue;
     kd_wakeUpDependents;
+  }
+
+  // F7 fix: L0 returned DIRTY data (an un-written-back store on the exclusive
+  // source), so the coherent source is now Modified -> rest in MM, not EE.
+  // The old EE-with-Dirty target lost the store on a later EE+Inv->I (which
+  // "don't send data").  MM answers Inv with data, so the store survives.
+  transition(EX_L0, {L0_DataAck, L0_DataCopy}, MM) {
+    u_writeDataFromL0Response;
+    spm_installFromCache;
+    spm_ackToL0;
+    s_deallocateTBE;
+    k_popL0RequestQueue;
+    kd_wakeUpDependents;
+  }
+
+  // F2 fix: an L0 capacity eviction (PUTX/WriteBack) can race the SPMCP_fetch
+  // L0-recall and arrive while in EX_L0/MX_L0, which had no transition (panic).
+  // Absorb the writeback data and settle into MX_L0: if the writeback was
+  // dirty the source is now Modified (its recall completes to MM); a clean
+  // writeback is conservatively treated as modified (a harmless redundant
+  // writeback of identical data), never as clean-exclusive with lost data.
+  transition({EX_L0, MX_L0}, WriteBack, MX_L0) {
+    u_writeDataFromL0Request;
+    k_popL0RequestQueue;
   }
 
   // After the L0 recall, the freshest data has settled into this L1 and can be
@@ -1435,7 +1605,22 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     k_popL0RequestQueue;
   }
 
-  transition({I, S, SS, E, EE, M, MM}, {SPMST, SPMWB_store, SPM_release}) {
+  transition({I, S, SS, E, EE, M, MM}, {SPMLD_direct, SPMWB_read_direct}) {
+    spm_readZeroToL0_direct;
+    k_spmPopL0RequestQueue;
+  }
+
+  transition({I, S, SS, E, EE, M, MM}, SPMST) {
+    spm_accessAckToL0;
+    k_popL0RequestQueue;
+  }
+
+  transition({I, S, SS, E, EE, M, MM}, SPMST_direct) {
+    spm_accessAckToL0_direct;
+    k_spmPopL0RequestQueue;
+  }
+
+  transition({I, S, SS, E, EE, M, MM}, {SPMWB_store, SPM_release}) {
     spm_ackToL0;
     k_popL0RequestQueue;
   }
@@ -1445,10 +1630,29 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     k_popL0RequestQueue;
   }
 
+  transition(X, {SPMLD_direct, SPMWB_read_direct}, X) {
+    spm_readHitToL0_direct;
+    k_spmPopL0RequestQueue;
+  }
+
+  // Some SPM vector load paths can arrive at the private L1 as a load-class
+  // request while targeting a scratchpad-owned slot.  Treat this as an SPM
+  // slot read instead of rejecting the otherwise-valid X-state access.
+  transition(X, Load, X) {
+    spm_readHitToL0;
+    k_popL0RequestQueue;
+  }
+
   transition(X, SPMST, X) {
     spm_storeHit;
-    spm_ackToL0;
+    spm_accessAckToL0;
     k_popL0RequestQueue;
+  }
+
+  transition(X, SPMST_direct, X) {
+    spm_storeHit_direct;
+    spm_accessAckToL0_direct;
+    k_spmPopL0RequestQueue;
   }
 
   transition(X, SPMWB_store, XWB) {
