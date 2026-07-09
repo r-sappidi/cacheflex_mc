@@ -1,0 +1,6 @@
+threads,src_lines,feat_lines,edges,repeat,cache_prefetch,cache_ticks,spm_ticks,speedup,cache_checksum,spm_checksum,cache_out,spm_out
+4,128,8,65536,1,0,237675600,256850800,0.925345,-395.43654377645709,-395.43654377645709,results/graph_spmm/cwm8_src128_e65536_cache,results/graph_spmm/cwm8_src128_e65536_spm
+4,256,8,32768,1,0,135456000,140061600,0.967117,369.60773200265078,369.60773200265078,results/graph_spmm/cwm8_src256_e32768_cache,results/graph_spmm/cwm8_src256_e32768_spm
+4,256,8,65536,1,0,247870000,257998400,0.960742,216.37648533943857,216.37648533943857,results/graph_spmm/cwm8_src256_e65536_cache,results/graph_spmm/cwm8_src256_e65536_spm
+4,256,8,131072,1,0,469270000,494009600,0.949921,927.26131049880792,927.26131049880792,results/graph_spmm/cwm8_src256_e131072_cache,results/graph_spmm/cwm8_src256_e131072_spm
+4,512,8,65536,1,0,250847600,261766400,0.958288,-225.09203221744087,-225.09203221744087,results/graph_spmm/cwm8_src512_e65536_cache,results/graph_spmm/cwm8_src512_e65536_spm
