@@ -78,6 +78,12 @@ const
   -- 1: confirmed gaps listed under "FINDINGS" in the header behave as the
   --    natural fix (stall_and_wait) so verification can continue deeper.
   ASSUME_FIXES: 1;
+  -- Fire-and-forget silent fetch: the home forwards an MT-owned silent
+  -- snapshot WITHOUT entering MT_SPMS (no line blocking, no Unblock).  The
+  -- forward can then race the owner's eviction/reacquisition arbitrarily, so
+  -- an ownerless L1 BOUNCES the request back to the home (which has, or will
+  -- have, the settled line) and clean-copy holders (S/SM/SS) serve directly.
+  FNF_SILENT: 1;
 
   -- Separately togglable model of the software placement contract that an
   -- SPMCP_install target way never aliases a line with an outstanding
@@ -132,7 +138,9 @@ const
   -- no-free-way migration panic.
   MIN_FREE:   2;
   REQ_POOL:   6;    -- L1->L2 request-vnet pool (>= 2 per core)
-  FWD_POOL:   2;    -- L2->L1 forwarded-request pool, per core
+  FWD_POOL:   4;    -- L2->L1 forwarded pool, per core (fire-and-forget silent
+                    -- fetch allows NCORE-1 concurrent forwards to one owner
+                    -- plus INV/GETX traffic; was 2 under MT_SPMS serialization)
   RSPC_POOL:  4;    -- responses to one core (data + up to NCORE-1 acks + ack)
   RSP2_POOL:  5;    -- responses to L2 (core WB/acks + one dir message)
   UNB_POOL:   3;    -- unblock messages to L2
@@ -1413,9 +1421,20 @@ ruleset c: CoreT; i: FwdIdx do
     rq := fwd[c][i].req;
     clear_fwd(c, i);
     if l1s[c] = L1_MM | l1s[c] = L1_EE then
-      -- snapshot + Unblock, coherence state untouched
+      -- snapshot, coherence state untouched (fire-and-forget: no Unblock)
       push_rspc(rq, RC_DATA, l1_data[c], false, 0, true);
-      push_unb(UB_UNB, c);
+      if FNF_SILENT = 0 then push_unb(UB_UNB, c); endif;
+    elsif FNF_SILENT = 1 &
+          (l1s[c] = L1_S | l1s[c] = L1_SS | l1s[c] = L1_SM) then
+      -- clean shared copy is a valid snapshot; serve without touching state
+      push_rspc(rq, RC_DATA, l1_data[c], false, 0, true);
+    elsif FNF_SILENT = 1 &
+          (l1s[c] = L1_I | l1s[c] = L1_IS | l1s[c] = L1_IM |
+           l1s[c] = L1_IS_I) then
+      -- ownerless: the home's registration was stale (our WB_Ack overtook
+      -- the forward on the unordered vnets).  BOUNCE the request back to
+      -- the home, which has absorbed (or is absorbing) the writeback.
+      push_req(RQ_SILENT, rq, 0, false);
     elsif l1s[c] = L1_M_I then
       -- FINDING F6 (confirmed reachable; matches the PageRank "sequencer
       -- unanswered" stampede): SLICC has the dying owner serve the snapshot
@@ -1427,12 +1446,17 @@ ruleset c: CoreT; i: FwdIdx do
       -- Fix: the M_I owner also hands its TBE data to L2 instead of the
       -- Unblock, and L2 takes MT_SPMS + WB_Data -> M (owner has left).
       push_rspc(rq, RC_DATA, l1t_data[c], false, 0, true);
-      if ASSUME_FIXES = 1 then
+      if FNF_SILENT = 1 then
+        -- fire-and-forget: serve from the writeback TBE and keep dying;
+        -- the home never blocked, so the in-flight PUTX needs no help
+        l1s[c] := L1_M_I;
+      elsif ASSUME_FIXES = 1 then
         push_rsp2(R2_WBDATA, c, l1t_data[c], l1t_dirty[c]);
+        l1s[c] := L1_SINK;
       else
         push_unb(UB_UNB, c);
+        l1s[c] := L1_SINK;
       endif;
-      l1s[c] := L1_SINK;
     else
       -- I/S-family/SS/IS/IM/SM/IS_I have no Fwd_GETS_Silent transition
       error "L1: Fwd_GETS_Silent in a state with no SLICC transition";
@@ -1759,7 +1783,9 @@ ruleset i: ReqIdx do
         push_rspc(c, RC_DATA, l2_data, false, 0, false);
       elsif l2s = L2_MT then
         push_fwd(l2_excl, FW_SILENT, false, c);
-        l2s := L2_MT_SPMS;
+        if FNF_SILENT = 0 then
+          l2s := L2_MT_SPMS;   -- legacy: block the line until Unblock
+        endif;                 -- fire-and-forget: stay MT
       else
         error "L2: SPM_GETS_SILENT in a state with no SLICC transition";
       endif;

@@ -96,7 +96,6 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     MT_IB, AccessPermission:Busy, desc="Blocked for L1_GETS from MT, got unblock, waiting for data";
     MT_SB, AccessPermission:Busy, desc="Blocked for L1_GETS from MT, got data,  waiting for unblock";
 
-    MT_SPMS, AccessPermission:Busy, desc="MT: forwarded silent SPM GETS to owner, awaiting owner completion; owner keeps the line and the requester is not added as a sharer";
 
     I_F, AccessPermission:Busy, desc="Flushing from NP,SS,M state, waiting for memory ack/sharers ack";
     I_FF, AccessPermission:Busy, desc="Flushing from SS state, waiting for sharers acks and memory ack";
@@ -1143,11 +1142,11 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     zz_stallAndWaitL1RequestQueue;
   }
 
-  transition({IM, IS, ISS, SPM_IS, SPM_WB, SPM_WB_INV, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS}, {L2_Replacement, L2_Replacement_clean, Flush, Flush_Data, Flush_NP, Flush_Clean, Flush_NP_Clean, Flush_Data_Clean}) {
+  transition({IM, IS, ISS, SPM_IS, SPM_WB, SPM_WB_INV, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, {L2_Replacement, L2_Replacement_clean, Flush, Flush_Data, Flush_NP, Flush_Clean, Flush_NP_Clean, Flush_Data_Clean}) {
     zz_stallAndWaitL1RequestQueue;
   }
 
-  transition({IM, IS, ISS, SPM_IS, SPM_WB, SPM_WB_INV, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS}, MEM_Inv) {
+  transition({IM, IS, ISS, SPM_IS, SPM_WB, SPM_WB_INV, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, MEM_Inv) {
     zn_recycleResponseNetwork;
   }
 
@@ -1156,35 +1155,11 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   }
 
 
-  transition({SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB, MT_SPMS},
+  transition({SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB},
              {L1_GETS, L1_GET_INSTR, L1_GETX, L1_UPGRADE,
               SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE,
               SPMWB_REQ}) {
     zz_stallAndWaitL1RequestQueue;
-  }
-
-  transition(MT_SPMS, {L1_PUTX, L1_PUTX_old}) {
-    zz_stallAndWaitL1RequestQueue;
-  }
-
-  // The owner signals completion of a silent SPM snapshot with an Unblock;
-  // the requester took its copy into a non-coherent SPM slot, so it is not
-  // added as a sharer and the line stays Modified in the owner (MT).
-  transition(MT_SPMS, Unblock, MT) {
-    k_popUnblockQueue;
-    kd_wakeUpDependents;
-  }
-
-  // F6 fix: a DYING owner (L1 was in M_I, mid-writeback) serves the silent
-  // snapshot but hands its data back instead of a bare Unblock, because it is
-  // leaving the coherence domain.  Pull the line back into L2 (-> M, owner
-  // cleared) so no phantom owner remains for a later request to be forwarded
-  // to (which previously panicked/deadlocked in the owner's SINK_WB_ACK).
-  transition(MT_SPMS, {WB_Data, WB_Data_clean}, M) {
-    m_writeDataToCache;
-    spc_clearSPMOwner;
-    o_popIncomingResponseQueue;
-    kd_wakeUpDependents;
   }
 
   transition({I_F, MT_F, I_FF}, {L1_GETS, L1_GET_INSTR, L1_GETX, L1_UPGRADE, L1_PUTX, L1_PUTX_old, SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE, SPMWB_REQ, L2_Replacement, L2_Replacement_clean, WB_Data, WB_Data_clean, MEM_Inv, Unblock, Exclusive_Unblock}) {
@@ -1431,7 +1406,13 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     jj_popL1RequestQueue;
   }
 
-  transition(MT, SPM_GETS_SILENT, MT_SPMS) {
+  // Fire-and-forget: forward the snapshot request to the owner and stay in
+  // MT.  No line blocking, no Unblock -- a forward that loses the race with
+  // the owner's eviction is BOUNCED back here by the ownerless L1 and finds
+  // the settled line (M) or the next owner.  Verified in cacheflex_spm_mc.m
+  // (FNF_SILENT=1); replaces the MT_SPMS serialization window, which was
+  // 98% of pull-fetch home traffic in the stencil profile.
+  transition(MT, SPM_GETS_SILENT) {
     sb_forwardSilentGetSToExclusive;
     uu_profileMiss;
     set_setMRU;
