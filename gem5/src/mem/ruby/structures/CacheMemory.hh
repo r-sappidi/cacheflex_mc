@@ -103,6 +103,7 @@ class CacheMemory : public SimObject
     AbstractCacheEntry* allocateSPMSlot(Addr address, int spm_set, int spm_way,
                                         AbstractCacheEntry* new_entry);
     DataBlock readSPMData(Addr address, int size);
+    void writeSPMData(Addr address, const DataBlock& data, int size);
     void allocateVoid(Addr address, AbstractCacheEntry* new_entry)
     {
         allocate(address, new_entry);

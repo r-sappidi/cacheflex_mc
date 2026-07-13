@@ -461,6 +461,9 @@ CacheMemory::allocateSPMSlot(Addr address, int spm_set, int spm_way,
 DataBlock
 CacheMemory::readSPMData(Addr address, int size)
 {
+    if (size <= 0) {
+        size = m_block_size;
+    }
     assert(size > 0);
 
     DataBlock result(size);
@@ -500,6 +503,50 @@ CacheMemory::readSPMData(Addr address, int size)
     }
 
     return result;
+}
+
+void
+CacheMemory::writeSPMData(Addr address, const DataBlock& data, int size)
+{
+    if (size <= 0) {
+        size = m_block_size;
+    }
+    assert(size > 0);
+
+    const Addr base_addr = makeLineAddress(address);
+    const int start_way = static_cast<int>((base_addr >> 16) & 0x7);
+    const int set = static_cast<int>((base_addr >> 6) & 0x3ff);
+    const int first_offset = static_cast<int>(address & (m_block_size - 1));
+
+    int copied = 0;
+    int slot_index = 0;
+    while (copied < size) {
+        const int slot_offset = (slot_index == 0) ? first_offset : 0;
+        const int bytes = std::min(m_block_size - slot_offset, size - copied);
+        const int way = start_way + slot_index;
+
+        panic_if(way >= m_cache_assoc,
+                 "SPM write at %#x size %d crosses beyond way %d",
+                 address, size, way);
+
+        const Addr slot_addr =
+            (base_addr & ~(static_cast<Addr>(0x7) << 16)) |
+            (static_cast<Addr>(way) << 16);
+        panic_if(addressToCacheSet(slot_addr) != set,
+                 "SPM wide write slot %#x changed set from %d to %d",
+                 slot_addr, set, addressToCacheSet(slot_addr));
+
+        AbstractCacheEntry *entry = lookup(slot_addr);
+        panic_if(entry == nullptr || !entry->isScratchpad(),
+                 "SPM write at %#x maps to absent/non-SPM slot %#x",
+                 address, slot_addr);
+
+        entry->getDataBlk().setData(data.getData(slot_offset, bytes),
+                                    slot_offset, bytes);
+
+        copied += bytes;
+        ++slot_index;
+    }
 }
 
 void
