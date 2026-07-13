@@ -49,11 +49,6 @@ static inline void spmcp64(uint64_t dst_spm, const void *src)
                  : "memory");
 }
 
-static inline void spm_release(uint64_t slot)
-{
-    asm volatile("SPMREL_8_IMM xzr, [%0, #0]\n" :: "r"(slot) : "memory");
-}
-
 static inline void spm_load64_to_mem(void *dst, uint64_t src_spm)
 {
     asm volatile(
@@ -244,12 +239,6 @@ static void *worker(void *opaque)
         m5_dump_stats(0, 0);              /* ---- ROI ends ---- */
     }
 
-    /* hygiene: release this core's slots (outside the ROI) */
-    if (a->mode == MODE_PULL) {
-        if (has_up) for (int j = 0; j < L; ++j) spm_release(in_slot(0, 0, j));
-        if (has_dn) for (int j = 0; j < L; ++j) spm_release(in_slot(1, 0, j));
-        DSB;
-    }
     return NULL;
 }
 
