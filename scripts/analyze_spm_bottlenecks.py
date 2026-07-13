@@ -146,7 +146,7 @@ def main():
             continue
         state, ev = m.group(2), m.group(3)
         if ("SPM" in ev or "Silent" in ev or "SPM" in state
-                or state in ("X", "XWB", "XHO", "IX_D", "SX_L0", "EX_L0",
+                or state in ("X", "XWB", "IX_D", "SX_L0", "EX_L0",
                              "MX_L0", "MT_SPMS")):
             print(f"    {m.group(1):<22} {state:<10} {ev:<24} {v:>10.0f}")
 
