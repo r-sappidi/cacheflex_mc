@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# usage: MODE=cache|pull|push [SPM_WAYS=..] [ROWS=..] [COLS=..] [ITERS=..] [SPINBAR=0|1] ./run_stencil_halo_8core.sh
+# usage: MODE=cache|pull [SPM_WAYS=..] [ROWS=..] [COLS=..] [ITERS=..] [SPINBAR=0|1] ./run_stencil_halo_8core.sh
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
