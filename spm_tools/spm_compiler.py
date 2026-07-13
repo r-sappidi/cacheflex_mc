@@ -8,7 +8,6 @@ trimmed to the instruction forms used by the benchmark kernels:
   SPMWB_64_IMM x_spm, [x_dst, #0]
   SPMLDR_8_IMM x_dst, [x_spm, #0]
   SPMSTR_8_IMM x_src, [x_spm, #0]
-  SPMREL_8_IMM xzr, [x_spm, #0]
   spm.ld1d z0.d, p0/z, [x_spm]
   spm.st1d z0.d, p0,   [x_spm]
 
@@ -25,7 +24,7 @@ from pathlib import Path
 
 
 SCALAR_RE = re.compile(
-    r"^\s*SPM(CP|WB|LDR|STR|REL)_(\d+)_(IMM|POST|PRE)\s+"
+    r"^\s*SPM(CP|WB|LDR|STR)_(\d+)_(IMM|POST|PRE)\s+"
     r"([wx](?:[0-9]|[12][0-9]|3[01])|sp|xzr|wzr),\s*"
     r"\[([wx](?:[0-9]|[12][0-9]|3[01])|sp|xzr|wzr)"
     r"(?:,\s*#?(-?\d+))?\]\s*$",
@@ -42,7 +41,7 @@ VECTOR_RE = re.compile(
 )
 
 
-SCALAR_OP = {"LDR": 0, "STR": 1, "REL": 1, "CP": 2, "WB": 3}
+SCALAR_OP = {"LDR": 0, "STR": 1, "CP": 2, "WB": 3}
 ADDR_MODE = {"IMM": 0, "POST": 1, "PRE": 2}
 SIZE2 = {"1": 0, "2": 1, "4": 2, "8": 3, "16": 3, "32": 3, "64": 3}
 EXT2 = {"8": 0, "16": 1, "32": 2, "64": 3}
@@ -91,11 +90,6 @@ def encode_scalar(text: str) -> int | None:
     size2 = SIZE2[size_name]
     mode = ADDR_MODE[mode_name.upper()]
     ext2 = EXT2.get(size_name, 0)
-    # Scalar SPM store and release share op=1 in the custom encoding.  Use the
-    # otherwise-unused ext2=3 pattern for release so gem5 can distinguish
-    # SPMREL from SPMSTR while keeping scalar stores on ext2=0.
-    if op_name.upper() == "REL":
-        ext2 = 3
     imm = int(imm_text or 0)
 
     if op <= 1:
