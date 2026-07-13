@@ -1226,6 +1226,14 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
                 // otherwise alias SPM slots).
                 msg->m_SPMWay = pkt->req->getSPMWay() & 0x7; // C6
             }
+            if (secondary_type == RubyRequestType_SPMST && pkt->hasData()) {
+                // SPM store payload travels in WTData at the slot's in-line
+                // offset (writeSPMData reads it from there); the generic
+                // RubyRequest constructor leaves WTData zeroed.
+                msg->m_WTData.setData(pkt->getConstPtr<uint8_t>(),
+                                      getOffset(msg->m_DstSPMAddr),
+                                      pkt->getSize());
+            }
         }
 
         DPRINTFR(ProtocolTrace, "%15s %3s %10s%20s %6s>%-6s %#x %s\n",
