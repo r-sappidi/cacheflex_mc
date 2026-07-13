@@ -91,6 +91,10 @@ let {{
                 self.instFlags.append("IsSPMMem")
                 self.memFlags.append("Request::SPMST")
                 self.memFlags.append("Request::PHYSICAL")
+            elif self.flavor == "SPMREL":
+                self.instFlags.append("IsSPMMem")
+                self.memFlags.append("Request::SPM_RELEASE")
+                self.memFlags.append("Request::PHYSICAL")
             elif self.flavor == "SPMCP":
                 self.instFlags.append("IsSPMMem")
                 self.memFlags.append("Request::SPMCP_FETCH")
@@ -312,6 +316,8 @@ let {{
     for sz in [1, 2, 4, 8]:
         buildSPMStores("spmstr", f"SPMSTR_{sz}", size=sz,
                        flavor="SPMST")
+        buildSPMStores("spmrel", f"SPMREL_{sz}", size=sz,
+                       flavor="SPMREL")
 
     for sz in [1, 2, 4, 8, 16, 32, 64]:
         buildSPMStores("spmcp", f"SPMCP_{sz}", size=8,

@@ -99,6 +99,23 @@ namespace Aarch64
         }
 
         switch (op) {
+          case 0x1:
+            if (ext2 == 0x3) {
+                switch (elemBytes) {
+                  case 1: SPM_ADDRMODE(SPMREL_1); break;
+                  case 2: SPM_ADDRMODE(SPMREL_2); break;
+                  case 4: SPM_ADDRMODE(SPMREL_4); break;
+                  case 8: SPM_ADDRMODE(SPMREL_8); break;
+                }
+            } else {
+                switch (elemBytes) {
+                  case 1: SPM_ADDRMODE(SPMSTR_1); break;
+                  case 2: SPM_ADDRMODE(SPMSTR_2); break;
+                  case 4: SPM_ADDRMODE(SPMSTR_4); break;
+                  case 8: SPM_ADDRMODE(SPMSTR_8); break;
+                }
+            }
+            break;
           case 0x2:
             switch (elemBytes) {
               case 1: SPM_ADDRMODE(SPMCP_1); break;
@@ -3934,7 +3951,7 @@ def format Aarch64() {{
             return decodeDataProcReg(machInst);
         } else if (bits(machInst, 24) == 1 &&
                    bits(machInst, 31, 28) == 0xF) {
-            if (bits(machInst, 23, 22) >= 2)
+            if (bits(machInst, 23, 22) >= 1)
                 return decodeSPM(machInst);
             return new Gem5Op64(machInst);
         } else {

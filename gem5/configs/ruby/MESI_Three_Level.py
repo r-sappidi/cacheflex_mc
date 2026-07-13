@@ -228,12 +228,16 @@ def create_system(
             # path (see its "cannot violate the FIFO ordering" comment) -- but
             # L0cache.sm has no matching dedicated out_port; every L0 request,
             # SPM or not, leaves on the single requestNetwork_out/bufferToL1.
-            # Route the two L1 in_ports off that same buffer so the
-            # (pre-existing, not spm_handoff-related) unconnected-parameter
-            # fatal is fixed and spm_ld/spm_st requests are actually
-            # deliverable; this does not give SPM requests a physically
-            # separate queue the way the response side already does.
-            l1_cntrl.spmBufferFromL0 = l0_cntrl.bufferToL1
+            # A MessageBuffer can only be registered to one consumer, so this
+            # can't simply alias l0_cntrl.bufferToL1 (already consumed by
+            # l1_cntrl.bufferFromL0). Give it its own buffer: this satisfies
+            # the required-parameter check and lets the simulator start;
+            # SPM requests are still delivered correctly because they are
+            # in fact tagged and routed through the shared, already-wired
+            # bufferFromL0 path (see messageBufferFromL0_in) -- nothing in
+            # L0cache.sm has ever produced traffic for spmBufferFromL0, on
+            # main or here, so this buffer is intentionally never fed.
+            l1_cntrl.spmBufferFromL0 = MessageBuffer(ordered=True)
             # This buffer carries both the 1-cycle direct SPM datapath
             # response (spm_access_response_latency) and slower bridge-op
             # acks (spm_response_latency) -- two different physical return

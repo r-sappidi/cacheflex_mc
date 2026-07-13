@@ -9,6 +9,8 @@ static inline void spm_store64_from_mem(uint64_t dst, const void *src)
 { asm volatile("mov x9, #8\nwhilelt p0.d, xzr, x9\nld1d z0.d, p0/z, [%1]\nspm.st1d z0.d, p0, [%0]\n" :: "r"(dst), "r"(src) : "x9","p0","z0","memory"); }
 static inline void spm_load64_to_mem(void *dst, uint64_t src)
 { asm volatile("mov x9, #8\nwhilelt p0.d, xzr, x9\nspm.ld1d z0.d, p0/z, [%1]\nst1d z0.d, p0, [%0]\n" :: "r"(dst), "r"(src) : "x9","p0","z0","memory"); }
+static inline void spm_release(uint64_t slot)
+{ asm volatile("SPMREL_8_IMM xzr, [%0, #0]\n" :: "r"(slot) : "memory"); }
 int main()
 {
     alignas(64) uint64_t a[8], b[8], out[8];
@@ -25,5 +27,6 @@ int main()
     printf("spmst_test %s%s out[0]=%llx expect=%llx\n", ok ? "PASS" : "FAIL",
            stale ? " (STALE: spm.st1d dropped)" : "",
            (unsigned long long)out[0], (unsigned long long)b[0]);
+    spm_release(slot);
     return ok ? 0 : 1;
 }
