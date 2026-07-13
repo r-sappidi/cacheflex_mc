@@ -223,7 +223,24 @@ def create_system(
             l1_cntrl.bufferFromL0 = l0_cntrl.bufferToL1
             l0_cntrl.bufferFromL1 = MessageBuffer(ordered=True)
             l1_cntrl.bufferToL0 = l0_cntrl.bufferFromL1
-            l0_cntrl.spmBufferFromL1 = MessageBuffer(ordered=True)
+            # L1cache.sm declares spmBufferFromL0 as a distinct in_port from
+            # bufferFromL0, intending a dedicated low-latency SPM request
+            # path (see its "cannot violate the FIFO ordering" comment) -- but
+            # L0cache.sm has no matching dedicated out_port; every L0 request,
+            # SPM or not, leaves on the single requestNetwork_out/bufferToL1.
+            # Route the two L1 in_ports off that same buffer so the
+            # (pre-existing, not spm_handoff-related) unconnected-parameter
+            # fatal is fixed and spm_ld/spm_st requests are actually
+            # deliverable; this does not give SPM requests a physically
+            # separate queue the way the response side already does.
+            l1_cntrl.spmBufferFromL0 = l0_cntrl.bufferToL1
+            # This buffer carries both the 1-cycle direct SPM datapath
+            # response (spm_access_response_latency) and slower bridge-op
+            # acks (spm_response_latency) -- two different physical return
+            # latencies sharing one queue. It must be unordered: an ordered
+            # (FIFO) buffer would let an earlier slow bridge ack head-of-line
+            # block a later, faster direct response to a different slot.
+            l0_cntrl.spmBufferFromL1 = MessageBuffer(ordered=False)
             l1_cntrl.spmBufferToL0 = l0_cntrl.spmBufferFromL1
 
             # Connect the L1 controllers and the network
