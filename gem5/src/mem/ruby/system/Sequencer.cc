@@ -98,9 +98,33 @@ rubyRequestAddress(PacketPtr pkt, RubyRequestType type)
 } // anonymous namespace
 
 Sequencer::Sequencer(const Params &p)
-    : RubyPort(p), m_IncompleteTimes(MachineType_NUM),
+    : RubyPort(p),
+      ADD_STAT(m_spmcpRequestsIssued, statistics::units::Count::get(),
+               "Number of SPMCP Ruby transactions issued"),
+      ADD_STAT(m_spmcpRequestsCompleted, statistics::units::Count::get(),
+               "Number of SPMCP Ruby transactions completed"),
+      ADD_STAT(m_spmcpBusyCycles, statistics::units::Cycle::get(),
+               "Union of cycles with one or more SPMCPs outstanding"),
+      ADD_STAT(m_spmcpOutstandingCycleArea, statistics::units::Cycle::get(),
+               "Integral of outstanding SPMCP count over cycles"),
+      ADD_STAT(m_spmcpMaxOutstanding, statistics::units::Count::get(),
+               "Maximum concurrent outstanding SPMCP transactions"),
+      ADD_STAT(m_spmcpAverageParallelism, statistics::units::Ratio::get(),
+               "Average SPMCP parallelism while at least one copy is active"),
+      ADD_STAT(m_spmcpRequestAttempts, statistics::units::Count::get(),
+               "Number of SPMCP admission attempts, including retries"),
+      ADD_STAT(m_spmcpBufferFullRejects, statistics::units::Count::get(),
+               "SPMCP attempts rejected because the sequencer was full"),
+      ADD_STAT(m_spmcpBlockedLineRejects, statistics::units::Count::get(),
+               "SPMCP attempts rejected because the source line was blocked"),
+      ADD_STAT(m_spmcpAliasedRequests, statistics::units::Count::get(),
+               "SPMCP requests combined with an outstanding same-line request"),
+      m_IncompleteTimes(MachineType_NUM),
       deadlockCheckEvent([this]{ wakeup(); }, "Sequencer deadlock check")
 {
+    m_spmcpAverageParallelism =
+        m_spmcpOutstandingCycleArea / m_spmcpBusyCycles;
+    m_spmcpLastAccountCycle = curCycle();
     m_outstanding_count = 0;
 
     m_ruby_system = p.ruby_system;
@@ -310,6 +334,17 @@ Sequencer::functionalWrite(Packet *func_pkt)
 
 void Sequencer::resetStats()
 {
+    accountSPMCPOutstanding(curCycle());
+    m_spmcpRequestsIssued.reset();
+    m_spmcpRequestsCompleted.reset();
+    m_spmcpBusyCycles.reset();
+    m_spmcpOutstandingCycleArea.reset();
+    m_spmcpMaxOutstanding.reset();
+    m_spmcpRequestAttempts.reset();
+    m_spmcpBufferFullRejects.reset();
+    m_spmcpBlockedLineRejects.reset();
+    m_spmcpAliasedRequests.reset();
+    m_spmcpLastAccountCycle = curCycle();
     m_outstandReqHist.reset();
     m_latencyHist.reset();
     m_hitLatencyHist.reset();
@@ -335,6 +370,18 @@ void Sequencer::resetStats()
 
         m_IncompleteTimes[i] = 0;
     }
+}
+
+void
+Sequencer::accountSPMCPOutstanding(Cycles now)
+{
+    assert(now >= m_spmcpLastAccountCycle);
+    const Cycles elapsed = now - m_spmcpLastAccountCycle;
+    if (m_spmcpOutstanding != 0) {
+        m_spmcpBusyCycles += elapsed;
+        m_spmcpOutstandingCycleArea += elapsed * m_spmcpOutstanding;
+    }
+    m_spmcpLastAccountCycle = now;
 }
 
 // Insert the request in the request table. Return RequestStatus_Aliased
@@ -435,6 +482,13 @@ Sequencer::recordMissLatency(SequencerRequest* srequest, bool llscSuccess,
     RubyRequestType type = srequest->m_type;
     Cycles issued_time = srequest->issue_time;
     Cycles completion_time = curCycle();
+
+    if (type == RubyRequestType_SPMCP_fetch) {
+        accountSPMCPOutstanding(completion_time);
+        assert(m_spmcpOutstanding > 0);
+        --m_spmcpOutstanding;
+        ++m_spmcpRequestsCompleted;
+    }
 
     assert(curCycle() >= issued_time);
     Cycles total_lat = completion_time - issued_time;
@@ -987,10 +1041,16 @@ Sequencer::empty() const
 RequestStatus
 Sequencer::makeRequest(PacketPtr pkt)
 {
+    const bool is_spmcp = pkt->req->isSPMCPFetch();
+    if (is_spmcp)
+        ++m_spmcpRequestAttempts;
+
     // HTM abort signals must be allowed to reach the Sequencer
     // the same cycle they are issued. They cannot be retried.
     if ((m_outstanding_count >= m_max_outstanding_requests) &&
         !pkt->req->isHTMAbort()) {
+        if (is_spmcp)
+            ++m_spmcpBufferFullRejects;
         return RequestStatus_BufferFull;
     }
 
@@ -1120,10 +1180,15 @@ Sequencer::makeRequest(PacketPtr pkt)
         // Return that this request's cache line address aliases with
         // a prior request that locked the cache line. The request cannot
         // proceed until the cache line is unlocked by a Locked_RMW_Write
+        if (is_spmcp)
+            ++m_spmcpBlockedLineRejects;
         return RequestStatus_Aliased;
     }
 
     RequestStatus status = insertRequest(pkt, primary_type, secondary_type);
+
+    if (is_spmcp && status == RequestStatus_Aliased)
+        ++m_spmcpAliasedRequests;
 
     // It is OK to receive RequestStatus_Aliased, it can be considered Issued
     if (status != RequestStatus_Ready && status != RequestStatus_Aliased)
@@ -1141,6 +1206,13 @@ void
 Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
 {
     assert(pkt != NULL);
+    if (secondary_type == RubyRequestType_SPMCP_fetch) {
+        accountSPMCPOutstanding(curCycle());
+        ++m_spmcpOutstanding;
+        ++m_spmcpRequestsIssued;
+        if (m_spmcpOutstanding > m_spmcpMaxOutstanding.value())
+            m_spmcpMaxOutstanding = m_spmcpOutstanding;
+    }
     ContextID proc_id = pkt->req->hasContextId() ?
         pkt->req->contextId() : InvalidContextID;
 

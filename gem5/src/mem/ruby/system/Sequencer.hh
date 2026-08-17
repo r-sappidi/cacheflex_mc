@@ -211,6 +211,7 @@ class Sequencer : public RubyPort
 
   protected:
     void issueRequest(PacketPtr pkt, RubyRequestType type);
+    void accountSPMCPOutstanding(Cycles now);
     virtual void hitCallback(SequencerRequest* srequest, DataBlock& data,
                              bool llscSuccess,
                              const MachineType mach, const bool externalHit,
@@ -273,6 +274,22 @@ class Sequencer : public RubyPort
     // Global outstanding request count, across all request tables
     int m_outstanding_count;
     bool m_deadlock_check_scheduled;
+
+    // Concurrency-aware SPMCP accounting.  Individual request latency cannot
+    // be summed when several copies overlap; these counters integrate the
+    // union and occupancy of all outstanding copy intervals instead.
+    unsigned m_spmcpOutstanding = 0;
+    Cycles m_spmcpLastAccountCycle = Cycles(0);
+    statistics::Scalar m_spmcpRequestsIssued;
+    statistics::Scalar m_spmcpRequestsCompleted;
+    statistics::Scalar m_spmcpBusyCycles;
+    statistics::Scalar m_spmcpOutstandingCycleArea;
+    statistics::Scalar m_spmcpMaxOutstanding;
+    statistics::Formula m_spmcpAverageParallelism;
+    statistics::Scalar m_spmcpRequestAttempts;
+    statistics::Scalar m_spmcpBufferFullRejects;
+    statistics::Scalar m_spmcpBlockedLineRejects;
+    statistics::Scalar m_spmcpAliasedRequests;
 
     int m_coreId;
 

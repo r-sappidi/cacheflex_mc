@@ -32,6 +32,7 @@
 
 #include "base/compiler.hh"
 #include "base/debug.hh"
+#include "cpu/o3/cpu.hh"
 #include "cpu/o3/dyn_inst.hh"
 #include "cpu/o3/inst_queue.hh"
 #include "cpu/o3/limits.hh"
@@ -51,14 +52,14 @@ int MemDepUnit::MemDepEntry::memdep_insert = 0;
 int MemDepUnit::MemDepEntry::memdep_erase = 0;
 #endif
 
-MemDepUnit::MemDepUnit() : iqPtr(NULL), stats(nullptr) {}
+MemDepUnit::MemDepUnit() : iqPtr(NULL), cpu(nullptr), stats(nullptr) {}
 
 MemDepUnit::MemDepUnit(const BaseO3CPUParams &params)
     : _name(params.name + ".memdepunit"),
       depPred(_name + ".storesets", params.store_set_clear_period,
               params.SSITSize, params.SSITAssoc, params.SSITReplPolicy,
               params.SSITIndexingPolicy, params.LFSTSize),
-      iqPtr(NULL),
+      iqPtr(NULL), cpu(nullptr),
       stats(nullptr)
 {
     DPRINTF(MemDepUnit, "Creating MemDepUnit object.\n");
@@ -96,6 +97,7 @@ MemDepUnit::init(const BaseO3CPUParams &params, ThreadID tid, CPU *cpu)
     DPRINTF(MemDepUnit, "Creating MemDepUnit %i object.\n",tid);
 
     id = tid;
+    this->cpu = cpu;
 
     depPred.init(params.store_set_clear_period,
                  params.SSITSize, params.SSITAssoc, params.SSITReplPolicy,
@@ -114,8 +116,28 @@ MemDepUnit::MemDepUnitStats::MemDepUnitStats(statistics::Group *parent)
       ADD_STAT(conflictingLoads, statistics::units::Count::get(),
                "Number of conflicting loads."),
       ADD_STAT(conflictingStores, statistics::units::Count::get(),
-               "Number of conflicting stores.")
+               "Number of conflicting stores."),
+      ADD_STAT(completedBarriers, statistics::units::Count::get(),
+               "Number of completed architectural memory barriers."),
+      ADD_STAT(readyTimedBarriers, statistics::units::Count::get(),
+               "Barriers observed at the commit-ready timing point."),
+      ADD_STAT(barriersWithoutReadyTimestamp, statistics::units::Count::get(),
+               "Barrier-like operations completed without commit-ready timing."),
+      ADD_STAT(barrierPipelineCycles, statistics::units::Cycle::get(),
+               "Memory-barrier cycles from mem-dep insertion to completion."),
+      ADD_STAT(barrierReadyCycles, statistics::units::Cycle::get(),
+               "Memory-barrier cycles from commit-ready to completion."),
+      ADD_STAT(avgBarrierPipelineCycles,
+               statistics::units::Rate<statistics::units::Cycle,
+                                       statistics::units::Count>::get(),
+               "Average insertion-to-completion cycles per memory barrier."),
+      ADD_STAT(avgBarrierReadyCycles,
+               statistics::units::Rate<statistics::units::Cycle,
+                                       statistics::units::Count>::get(),
+               "Average commit-ready-to-completion cycles per memory barrier.")
 {
+    avgBarrierPipelineCycles = barrierPipelineCycles / completedBarriers;
+    avgBarrierReadyCycles = barrierReadyCycles / readyTimedBarriers;
 }
 
 bool
@@ -148,6 +170,8 @@ MemDepUnit::takeOverFrom()
     loadBarrierSNs.clear();
     storeBarrierSNs.clear();
     depPred.clear();
+    barrierInsertCycle.clear();
+    barrierReadyCycle.clear();
 }
 
 void
@@ -341,6 +365,8 @@ MemDepUnit::insertBarrier(const DynInstPtr &barr_inst)
     inst_entry->listIt = --(instList[tid].end());
 
     insertBarrierSN(barr_inst);
+    if (barr_inst->isReadBarrier() || barr_inst->isWriteBarrier())
+        barrierInsertCycle[barr_inst->seqNum] = cpu->curCycle();
 }
 
 void
@@ -373,6 +399,9 @@ MemDepUnit::nonSpecInstReady(const DynInstPtr &inst)
             inst->pcState(), inst->seqNum);
 
     MemDepEntryPtr inst_entry = findInHash(inst);
+
+    if (inst->isReadBarrier() || inst->isWriteBarrier())
+        barrierReadyCycle[inst->seqNum] = cpu->curCycle();
 
     moveToReady(inst_entry);
 }
@@ -429,6 +458,27 @@ MemDepUnit::completed(const DynInstPtr &inst)
 void
 MemDepUnit::completeInst(const DynInstPtr &inst)
 {
+    if (inst->isReadBarrier() || inst->isWriteBarrier()) {
+        const Cycles now = cpu->curCycle();
+        const auto inserted = barrierInsertCycle.find(inst->seqNum);
+        const auto ready = barrierReadyCycle.find(inst->seqNum);
+        // A barrier may reach this callback more than once through the O3
+        // completion paths.  Only the invocation paired with insertion owns
+        // the timing sample.
+        if (inserted != barrierInsertCycle.end()) {
+            stats.completedBarriers++;
+            stats.barrierPipelineCycles += now - inserted->second;
+            if (ready != barrierReadyCycle.end()) {
+                stats.readyTimedBarriers++;
+                stats.barrierReadyCycles += now - ready->second;
+                barrierReadyCycle.erase(ready);
+            } else {
+                stats.barriersWithoutReadyTimestamp++;
+            }
+            barrierInsertCycle.erase(inserted);
+        }
+    }
+
     wakeDependents(inst);
     completed(inst);
     InstSeqNum barr_sn = inst->seqNum;
@@ -548,6 +598,9 @@ MemDepUnit::squash(const InstSeqNum &squashed_num, ThreadID tid)
         loadBarrierSNs.erase((*squash_it)->seqNum);
 
         storeBarrierSNs.erase((*squash_it)->seqNum);
+
+        barrierInsertCycle.erase((*squash_it)->seqNum);
+        barrierReadyCycle.erase((*squash_it)->seqNum);
 
         hash_it = memDepHash.find((*squash_it)->seqNum);
 

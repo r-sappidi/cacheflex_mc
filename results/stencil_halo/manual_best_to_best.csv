@@ -1,9 +1,0 @@
-# 2D Jacobi 5-point halo exchange, 8 threads, 1024 cols, checksums bit-identical per row-group.
-# Each mode at its best barrier: cache=spin, pull=pthread.
-regime,band_rows,rows,iters,variant,roi_ticks,speedup_vs_cache
-compute-heavy,8,64,48,cache,149489600,1.000
-compute-heavy,8,64,48,spm_pull,120900800,1.236
-sync-bound,4,32,96,cache,260350400,1.000
-sync-bound,4,32,96,spm_pull,221248000,1.177
-strong-scale-limit,2,16,192,cache,478105200,1.000
-strong-scale-limit,2,16,192,spm_pull,365145600,1.309

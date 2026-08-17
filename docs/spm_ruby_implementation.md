@@ -715,7 +715,7 @@ SPM-aware request flags in the CPU/LSQ path
 SPM copy/load/store/writeback/release instruction flow
 ```
 
-The multicore repo reuses that path.
+The multicore repo reuses that path through the local SPM encoding tool.
 
 The build flow is:
 
@@ -724,19 +724,7 @@ The build flow is:
 3. Assemble/link the encoded assembly.
 4. Run on the SPM Ruby gem5 binary.
 
-For GEMM:
-
-```bash
-SPM_VL=16 bash benchmarks/gemm/build_acl_fp16_mc.sh
-```
-
-The build script includes `cacheflex_micro` headers:
-
-```bash
--I ../cacheflex_micro/kernels/llama_bench_spm
-```
-
-and runs:
+Benchmark build scripts run:
 
 ```bash
 python3 "$SPM_COMPILER" input.s output_enc.s
@@ -909,9 +897,8 @@ This section collects the main knobs that are particular to this SPM/Ruby implem
 | Ruby protocol | `MESI_Three_Level_SPM` | gem5 build target | Selects the SPM-aware Ruby protocol instead of the vanilla `MESI_Three_Level` protocol. |
 | gem5 binary | `build/ARM_MESI_Three_Level_SPM/gem5.opt` | `setup_spm_env.sh` | Ensures runs use the Ruby protocol containing SPM request types and transitions. |
 | SPM compiler | `spm_tools/spm_compiler.py` | `setup_spm_env.sh`, benchmark build scripts | Translates CacheFlex SPM mnemonics into the custom encoded instruction stream expected by the CPU-side SPM implementation. |
-| SPM kernel VL macro | `SPM_VL=16` for the current GEMM path | `benchmarks/gemm/build_acl_fp16_mc.sh` | Selects the `cacheflex_micro` SPM kernel variant at compile time. Must match the gem5 SVE vector length used in simulation. |
 
-Changing the protocol or binary path changes whether SPM requests are understood by Ruby at all. Changing `SPM_VL` changes the compiled SPM kernel shape and must be kept consistent with `sve_vl_se`.
+Changing the protocol or binary path changes whether SPM requests are understood by Ruby at all. Future vector benchmarks must keep their compiled vector length consistent with `sve_vl_se`.
 
 ### 21.2 Ruby hierarchy knobs
 

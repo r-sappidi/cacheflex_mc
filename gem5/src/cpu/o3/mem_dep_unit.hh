@@ -261,6 +261,18 @@ class MemDepUnit
     /** Pointer to the IQ. */
     InstructionQueue *iqPtr;
 
+    /** CPU clock source used by the barrier timing instrumentation. */
+    CPU *cpu;
+
+    /**
+     * Per-barrier timestamps.  "Inserted" is when the barrier enters the
+     * memory-dependence machinery; "ready" is when commit makes the
+     * non-speculative barrier eligible to execute.  The latter excludes the
+     * time spent simply waiting behind older ROB entries.
+     */
+    std::unordered_map<InstSeqNum, Cycles, SNHash> barrierInsertCycle;
+    std::unordered_map<InstSeqNum, Cycles, SNHash> barrierReadyCycle;
+
     /** The thread id of this memory dependence unit. */
     int id;
     struct MemDepUnitStats : public statistics::Group
@@ -276,6 +288,20 @@ class MemDepUnit
         /** Stat for number of conflicting stores that had to wait for a
          *  store. */
         statistics::Scalar conflictingStores;
+        /** Number of completed architectural memory barriers. */
+        statistics::Scalar completedBarriers;
+        /** Barriers which passed through the commit-ready timing point. */
+        statistics::Scalar readyTimedBarriers;
+        /** Barrier-like operations lacking a commit-ready callback. */
+        statistics::Scalar barriersWithoutReadyTimestamp;
+        /** Dispatch/insert to completion: complete pipeline footprint. */
+        statistics::Scalar barrierPipelineCycles;
+        /** Commit-ready to completion: barrier execution/serialization. */
+        statistics::Scalar barrierReadyCycles;
+        /** Average complete pipeline footprint per barrier. */
+        statistics::Formula avgBarrierPipelineCycles;
+        /** Average execution/serialization time per barrier. */
+        statistics::Formula avgBarrierReadyCycles;
     } stats;
 };
 

@@ -10,6 +10,19 @@ export GEM5_SPM="${GEM5_SPM:-$GEM5_ROOT/build/ARM_MESI_Three_Level_SPM/gem5.opt}
 export GEM5_SE="${GEM5_SE:-$GEM5_ROOT/configs/deprecated/example/se.py}"
 export SPM_COMPILER="${SPM_COMPILER:-$CACHEFLEX_MC_ROOT/spm_tools/spm_compiler.py}"
 export M5_INCLUDE="${M5_INCLUDE:-$GEM5_ROOT/include}"
+
+# This host's /usr/bin/python3 is Python 3.10, while its alternatives-managed
+# python3-config points at Python 3.6.  gem5 must be built against the config
+# helper matching the interpreter that runs SCons.
+if [ -z "${PYTHON_CONFIG:-}" ] && [ -x /usr/local/bin/python3.10-config ]; then
+    export PYTHON_CONFIG=/usr/local/bin/python3.10-config
+fi
+
+# Managed workspaces expose $HOME read-only, so ccache cannot use its default
+# ~/.ccache directory during a gem5 build.
+if [ -z "${CCACHE_DIR:-}" ] && [ ! -w "${HOME:-/nonexistent}" ]; then
+    export CCACHE_DIR="${TMPDIR:-/tmp}/cacheflex-ccache"
+fi
 if [ -z "${M5OP_OBJ:-}" ]; then
     if [ -f "$GEM5_ROOT/util/m5/build/arm64/out/m5op.o" ]; then
         export M5OP_OBJ="$GEM5_ROOT/util/m5/build/arm64/out/m5op.o"
