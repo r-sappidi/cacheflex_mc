@@ -58,6 +58,10 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
     M_DRDI, AccessPermission:Busy, desc="Intermediate State when there is a dma read";
     M_DWR, AccessPermission:Busy, desc="Intermediate State when there is a dma write";
     M_DWRI, AccessPermission:Busy, desc="Intermediate State when there is a dma write";
+    // An SPM writeback overtaken by a DMA invalidation is written first; the DMA
+    // still waits for the LLC's response to the (recycled) invalidation.
+    M_DRD_SWB, AccessPermission:Busy, desc="DMA read pending; SPM writeback to memory";
+    M_DWR_SWB, AccessPermission:Busy, desc="DMA write pending; SPM writeback to memory";
   }
 
   // Events
@@ -94,6 +98,8 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
     int Len,               desc="...";
     MachineID Requestor,   desc="The DMA engine that sent the request";
     Addr DstSPMAddr, default="0", desc="SPM slot address for response routing";
+    MachineID SPMRequestor, desc="LLC whose SPM writeback is written during a DMA";
+    Addr SPMDstSPMAddr, default="0", desc="SPM ack routing for that writeback";
   }
 
   structure(TBETable, external="yes") {
@@ -369,6 +375,7 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
   }
 
   action(spt_allocateSPMTBE, "spt", desc="Allocate TBE for an SPM directory request") {
+    check_allocate(TBEs);
     peek(requestNetwork_in, RequestMsg) {
       TBEs.allocate(address);
       set_tbe(TBEs[address]);
@@ -531,7 +538,39 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
     }
   }
 
+  action(sps_saveSPMWBInDMATBE, "sps", desc="Record an SPM writeback in the pending DMA TBE") {
+    peek(requestNetwork_in, RequestMsg) {
+      assert(is_valid(tbe));
+      tbe.SPMRequestor := in_msg.Requestor;
+      tbe.SPMDstSPMAddr := in_msg.DstSPMAddr;
+    }
+  }
+
+  action(spwd_sendSPMWBAckFromDMATBE, "spwd", desc="Ack an SPM writeback recorded in a DMA TBE") {
+    enqueue(responseNetwork_out, ResponseMsg, to_mem_ctrl_latency) {
+      assert(is_valid(tbe));
+      out_msg.addr := address;
+      out_msg.Type := CoherenceResponseType:SPMWB_ACK;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(tbe.SPMRequestor);
+      out_msg.DstSPMAddr := tbe.SPMDstSPMAddr;
+      out_msg.MessageSize := MessageSizeType:Response_Control;
+    }
+  }
+
+  action(qft_queueMemoryFetchForDMATBE, "qft", desc="Queue a DMA memory read from the TBE") {
+    enqueue(memQueue_out, MemoryMsg, to_mem_ctrl_latency) {
+      assert(is_valid(tbe));
+      out_msg.addr := address;
+      out_msg.Type := MemoryRequestType:MEMORY_READ;
+      out_msg.Sender := tbe.Requestor;
+      out_msg.MessageSize := MessageSizeType:Request_Control;
+      out_msg.Len := 0;
+    }
+  }
+
   action(v_allocateTBE, "v", desc="Allocate TBE") {
+    check_allocate(TBEs);
     peek(requestNetwork_in, RequestMsg) {
       TBEs.allocate(address);
       set_tbe(TBEs[address]);
@@ -672,12 +711,56 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
     z_stallAndWaitRequest;
   }
 
-  transition({ID, ID_W, M_DRDI, M_DWRI, IM, MI, SPM_IS, SPM_WB, SPM_PUT_WB}, {Fetch, Fetch_Silent, PutS, PutM, PutE, SPM_Writeback, Data} ) {
+  transition({ID, ID_W, M_DRDI, M_DWRI, IM, MI, SPM_IS, SPM_WB, SPM_PUT_WB, M_DRD_SWB, M_DWR_SWB}, {Fetch, Fetch_Silent, PutS, PutM, PutE, SPM_Writeback, Data} ) {
     z_stallAndWaitRequest;
   }
 
-  transition({ID, ID_W, M_DRD, M_DRDI, M_DWR, M_DWRI, IM, MI}, {DMA_WRITE, DMA_READ} ) {
+  // Requests other than an SPM writeback wait for the DMA to finish.
+  transition({M_DRD, M_DWR}, {Fetch, Fetch_Silent, PutS, PutM, PutE}) {
+    z_stallAndWaitRequest;
+  }
+
+  // DMA waits for in-flight SPM fetches and writebacks (VER-05).
+  transition({ID, ID_W, M_DRD, M_DRDI, M_DWR, M_DWRI, IM, MI, SPM_IS, SPM_WB, SPM_PUT_WB, M_DRD_SWB, M_DWR_SWB}, {DMA_WRITE, DMA_READ} ) {
     zz_recycleDMAQueue;
+  }
+
+  // The LLC recycles the DMA invalidation while its SPM writeback is outstanding.
+  // Stalling the writeback here would deadlock (VER-05 naive_stall): write it first.
+  transition(M_DRD, SPM_Writeback, M_DRD_SWB) {
+    sps_saveSPMWBInDMATBE;
+    spq_queueSPMWBRequest;
+    j_popIncomingRequestQueue;
+  }
+
+  transition(M_DWR, SPM_Writeback, M_DWR_SWB) {
+    sps_saveSPMWBInDMATBE;
+    spq_queueSPMWBRequest;
+    j_popIncomingRequestQueue;
+  }
+
+  transition(M_DRD_SWB, Memory_Ack, M_DRD) {
+    spwd_sendSPMWBAckFromDMATBE;
+    l_popMemQueue;
+  }
+
+  transition(M_DWR_SWB, Memory_Ack, M_DWR) {
+    spwd_sendSPMWBAckFromDMATBE;
+    l_popMemQueue;
+  }
+
+  // A clean LLC eviction raced the DMA invalidation (also absent upstream):
+  // memory is current, so ack the LLC and serve the DMA from memory.
+  transition(M_DRD, CleanReplacement, ID) {
+    a_sendAck;
+    qft_queueMemoryFetchForDMATBE;
+    k_popIncomingResponseQueue;
+  }
+
+  transition(M_DWR, CleanReplacement, ID_W) {
+    a_sendAck;
+    qw_queueMemoryWBRequest_partialTBE;
+    k_popIncomingResponseQueue;
   }
 
 
