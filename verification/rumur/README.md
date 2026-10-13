@@ -1,3 +1,8 @@
+> **Historical model/results:** this document predates the current PUT/ack,
+> retry, finite-network and L3 changes. See [the current refresh](current/README.md)
+> for supported scope and the versioned verification queue. Old results below
+> must not be represented as verification of the current complete implementation.
+
 # CacheFlex SPM multicore — Rumur model
 
 `cacheflex_spm_mc.m` is a message-level formal model of the **current**
