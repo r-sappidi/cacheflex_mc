@@ -95,9 +95,13 @@ let {{
                 self.instFlags.append("IsSPMMem")
                 self.memFlags.append("Request::SPM_RELEASE")
                 self.memFlags.append("Request::PHYSICAL")
-            elif self.flavor == "SPMCP":
+            elif self.flavor in ("SPMCP", "SPMCP_BATCH3", "SPMDMA_2D"):
                 self.instFlags.append("IsSPMMem")
                 self.memFlags.append("Request::SPMCP_FETCH")
+                if self.flavor == "SPMCP_BATCH3":
+                    self.memFlags.append("Request::SPMCP_BATCH3")
+                elif self.flavor == "SPMDMA_2D":
+                    self.memFlags.append("Request::SPMDMA_2D")
             elif self.flavor == "SPMWB":
                 self.instFlags.append("IsSPMMem")
                 self.memFlags.append("Request::SPMWB_STORE")
@@ -324,6 +328,12 @@ let {{
                        flavor="SPMCP")
         buildSPMStores("spmwb", f"SPMWB_{sz}", size=8,
                        flavor="SPMWB")
+
+    StoreImm64("spmcpb3", "SPMCP_BATCH3_64", size=8,
+               flavor="SPMCP_BATCH3").emit()
+    StoreImm64("spmdma2d", "SPMDMA_2D_64", size=8,
+               flavor="SPMDMA_2D").emit()
+
 
     buildStores64("strb", "STRB64", size=1)
     buildStores64("strh", "STRH64", size=2)

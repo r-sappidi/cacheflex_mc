@@ -79,6 +79,7 @@ class NetworkInterface : public ClockedObject, public Consumer
     int get_vnet(int vc);
     void init_net_ptr(GarnetNetwork *net_ptr) { m_net_ptr = net_ptr; }
 
+    bool functionalRead(Packet *pkt);
     bool functionalRead(Packet *pkt, WriteMask &mask);
     uint32_t functionalWrite(Packet *);
 
@@ -269,6 +270,12 @@ class NetworkInterface : public ClockedObject, public Consumer
 
 
   private:
+    // A single RX assembly credit per unidirectional link. Keep the source
+    // MessageBuffer head until RX delivery: no additional transmit queue.
+    MsgPtr directPending;
+    Tick directArrival = 0, directCreditReady = 0;
+    Tick directProtocolEnqueue = MaxTick;
+    bool directMessage(MsgPtr msg, int vnet, int kind);
     GarnetNetwork *m_net_ptr;
     const NodeID m_id;
     const int m_virtual_networks;
@@ -295,7 +302,7 @@ class NetworkInterface : public ClockedObject, public Consumer
 
     void checkStallQueue();
     bool flitisizeMessage(MsgPtr msg_ptr, int vnet);
-    int calculateVC(int vnet);
+    int calculateVC(int vnet, int dest);
 
 
     void scheduleOutputPort(OutputPort *oPort);

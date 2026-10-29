@@ -77,6 +77,9 @@ class RubyPort(ClockedObject):
     system = Param.System(Parent.any, "system object")
     support_data_reqs = Param.Bool(True, "data cache requests supported")
     support_inst_reqs = Param.Bool(True, "inst cache requests supported")
+    cacheflex_ifetch_same_tick_response = Param.Bool(False,
+        'DIAGNOSTIC: deliver completed IFETCH immediately when response queue '
+        'is empty; retain cache timing and normal queued retry fallback')
     is_cpu_sequencer = Param.Bool(True, "connected to a cpu")
 
 
@@ -88,6 +91,33 @@ class RubyPortProxy(RubyPort):
 
 class RubySequencer(RubyPort):
     type = "RubySequencer"
+    cacheflex_reduction = Param.Bool(False, 'Experimental bounded FP32 SPM scale/add engine')
+    cacheflex_l3_reduction = Param.Bool(False, 'Route captured scale/add commands to shared LLC bank engines')
+    cacheflex_reduction_cache = Param.RubyCache(NULL, 'Existing private L2 SRAM; used only to validate claimed destinations')
+    cacheflex_reduction_async = Param.Bool(True, 'ACK after payload capture, not SPM installation')
+    cacheflex_reduction_source_entries = Param.Unsigned(4, 'Core-side 256B contribution records')
+    cacheflex_reduction_sink_entries = Param.Unsigned(4, 'Near-SPM contribution records, including active update')
+    cacheflex_reduction_link_bytes = Param.Unsigned(16, 'Dedicated local command link bytes/cycle, including 16B header')
+    cacheflex_reduction_link_latency = Param.Cycles(2, 'Local command link fixed latency')
+    cacheflex_reduction_lanes = Param.Unsigned(16, 'FP32 lanes/cycle in serialized near-SPM engine')
+    cacheflex_reduction_mul_latency = Param.Cycles(3, 'FP32 multiply pipeline latency')
+    cacheflex_reduction_add_latency = Param.Cycles(3, 'FP32 add pipeline latency; non-fused arithmetic')
+    cacheflex_early_read_pcs = VectorParam.Addr([], 'DIAGNOSTIC: private accumulator load PCs returned early; real request/credits retained')
+    cacheflex_ideal_staging_cache = Param.RubyCache(NULL,
+        'DIAGNOSTIC ONLY: oracle copies into existing private SPM slots; no added SRAM')
+    cacheflex_ideal_staging_controller = Param.RubyController(NULL,
+        'Private L2 controller used to check stable SPM slot state for oracle copies')
+    cacheflex_spm_ingress = Param.MessageBuffer(NULL, 'Independent pure SPM input')
+    cacheflex_micro_data_misses = Param.MicroResourcePool(NULL, 'L1D miss pool')
+    cacheflex_micro_inst_misses = Param.MicroResourcePool(NULL, 'L1I miss pool')
+    cacheflex_micro_writebacks = Param.MicroResourcePool(NULL, 'L1 eviction pool')
+    cacheflex_micro_targets = Param.Unsigned(0, 'Target bound only while a miss is live')
+    cacheflex_finite_ingress = Param.Bool(False,
+        "Respect finite controller mandatory queue space, including alias replay")
+    cacheflex_max_line_targets = Param.Unsigned(0,
+        "Finite per-line coalescing target records (0 retains legacy behavior)")
+    cacheflex_max_bridge_requests = Param.Int(0,
+        "Cap bridge requests within shared total; ordinary requests may use all free credits (0 disables)")
     cxx_class = "gem5::ruby::Sequencer"
     cxx_header = "mem/ruby/system/Sequencer.hh"
 
@@ -96,6 +126,8 @@ class RubySequencer(RubyPort):
     max_outstanding_requests = Param.Int(
         16, "max requests (incl. prefetches) outstanding"
     )
+    cacheflex_fetch_credits = Param.Int(0, "Opt-in dedicated IFETCH credits within total cap; zero shares")
+    cacheflex_bridge_credits = Param.Int(0, "Opt-in dedicated SPMCP/SPMWB credits within total cap; zero shares")
     deadlock_threshold = Param.Cycles(
         500000,
         "max outstanding cycles for a request "

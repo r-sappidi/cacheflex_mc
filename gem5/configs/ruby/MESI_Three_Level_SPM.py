@@ -21,6 +21,10 @@ class L2Cache(_mesi.L2Cache):
 
 
 def define_options(parser):
+    parser.add_argument('--ruby-flight-recorder-entries', type=int, default=0,
+                        help='Recent diagnostic records per Ruby controller (0 disables)')
+    parser.add_argument('--ruby-flight-recorder-transitions-only', action='store_true',
+                        help='Omit message SEND/PEEK records from the flight recorder')
     return _mesi.define_options(parser)
 
 
@@ -53,7 +57,7 @@ def create_system(
     buildEnv["PROTOCOL"] = "MESI_Three_Level"
 
     try:
-        return _mesi.create_system(
+        result = _mesi.create_system(
             options,
             full_system,
             system,
@@ -62,6 +66,15 @@ def create_system(
             ruby_system,
             cpus,
         )
+        entries = options.ruby_flight_recorder_entries
+        if entries < 0:
+            fatal('--ruby-flight-recorder-entries must be nonnegative')
+        if entries:
+            for obj in ruby_system.descendants():
+                if isinstance(obj, RubyController):
+                    obj.flight_recorder_entries = entries
+                    obj.flight_recorder_messages = not options.ruby_flight_recorder_transitions_only
+        return result
     finally:
         buildEnv["PROTOCOL"] = old_protocol
         if old_l0 is None:

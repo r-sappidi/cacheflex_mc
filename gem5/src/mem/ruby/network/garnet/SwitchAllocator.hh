@@ -77,6 +77,16 @@ class SwitchAllocator : public Consumer
         return m_output_arbiter_activity;
     }
 
+    const std::vector<uint64_t> &get_sa_ready() const { return m_sa_ready; }
+    const std::vector<uint64_t> &get_sa_requests() const
+        { return m_sa_requests; }
+    const std::vector<uint64_t> &get_sa_grants() const { return m_sa_grants; }
+    const std::vector<uint64_t> &get_no_free_vc() const
+        { return m_no_free_vc; }
+    const std::vector<uint64_t> &get_no_credit() const { return m_no_credit; }
+    const std::vector<uint64_t> &get_ordering_blocked() const
+        { return m_ordering_blocked; }
+
     void resetStats();
 
   private:
@@ -84,6 +94,16 @@ class SwitchAllocator : public Consumer
     int m_num_vcs, m_vc_per_vnet;
 
     double m_input_arbiter_activity, m_output_arbiter_activity;
+
+    // Per-vnet allocation/congestion events. These count ready-flit checks,
+    // not mutually exclusive wall-clock cycles, so simultaneous blocked VCs
+    // remain visible instead of being collapsed into one router-cycle.
+    std::vector<uint64_t> m_sa_ready;
+    std::vector<uint64_t> m_sa_requests;
+    std::vector<uint64_t> m_sa_grants;
+    std::vector<uint64_t> m_no_free_vc;
+    std::vector<uint64_t> m_no_credit;
+    std::vector<uint64_t> m_ordering_blocked;
 
     Router *m_router;
     std::vector<int> m_round_robin_invc;

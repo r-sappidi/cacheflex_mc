@@ -55,6 +55,15 @@ class MessageBuffer(SimObject):
     cxx_header = "mem/ruby/network/MessageBuffer.hh"
 
     ordered = Param.Bool(False, "Whether the buffer is ordered")
+    cacheflex_ingress_lookahead = Param.Unsigned(
+        0, "Opt-in L0 mandatory RubyRequest bypass: examine at most N younger entries; 0 disables"
+    )
+    cacheflex_copy_demand_bypass = Param.Bool(
+        False, "Diagnostic copy-HOL isolation: search existing ingress for independent LD/IFETCH behind a stalled plain SPMCP; at most four demand probes per cycle"
+    )
+    clamp_fifo_arrival = Param.Bool(
+        False, "Diagnostic variable-latency service: delay earlier-ready messages to preserve FIFO order"
+    )
     buffer_size = Param.Unsigned(
         0,
         "Maximum number of entries to buffer \

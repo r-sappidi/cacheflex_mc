@@ -40,18 +40,22 @@
  */
 
 #include "mem/ruby/structures/CacheMemory.hh"
+#include "mem/ruby/common/WriteMask.hh"
 
 #include "base/intmath.hh"
 #include "base/logging.hh"
 #include "base/trace.hh"
 #include "debug/HtmMem.hh"
 #include "debug/RubyCache.hh"
+#include "debug/CacheFlexResidency.hh"
 #include "debug/RubyCacheTrace.hh"
 #include "debug/RubyResourceStalls.hh"
 #include "debug/RubyStats.hh"
 #include "mem/cache/replacement_policies/weighted_lru_rp.hh"
 #include "mem/ruby/protocol/AccessPermission.hh"
 #include "mem/ruby/system/RubySystem.hh"
+#include "softfloat.h"
+#include <cstring>
 
 namespace gem5
 {
@@ -76,7 +80,12 @@ CacheMemory::CacheMemory(const Params &p)
 {
     m_cache_size = p.size;
     m_cache_assoc = p.assoc;
+    m_coherent_assoc = p.assoc;
+    m_spm_separate_backing = p.spm_separate_backing;
+    m_spm_set_stride = p.spm_set_stride;
     m_num_spm_ways = p.num_spm_ways;
+    if (m_spm_separate_backing)
+        m_cache_assoc += m_num_spm_ways;
     m_replacementPolicy_ptr = p.replacement_policy;
     m_start_index_bit = p.start_index_bit;
     m_is_instruction_only_cache = p.is_icache;
@@ -105,21 +114,30 @@ void
 CacheMemory::init()
 {
     assert(m_block_size != 0);
-    panic_if(m_num_spm_ways < 0 || m_num_spm_ways >= m_cache_assoc,
-             "num_spm_ways %d must be in [0, assoc=%d) to leave at least one "
-             "coherent way", m_num_spm_ways, m_cache_assoc);
-    m_cache_num_sets = (m_cache_size / m_cache_assoc) / m_block_size;
+    panic_if(m_num_spm_ways < 0 || m_num_spm_ways > m_coherent_assoc,
+             "num_spm_ways %d must be in [0, assoc=%d]",
+             m_num_spm_ways, m_coherent_assoc);
+    m_cache_num_sets = (m_cache_size / m_coherent_assoc) / m_block_size;
     assert(m_cache_num_sets > 1);
     m_cache_num_set_bits = floorLog2(m_cache_num_sets);
     assert(m_cache_num_set_bits > 0);
+    panic_if(m_spm_set_stride && (m_spm_separate_backing ||
+             m_block_size != 64 || m_start_index_bit != 6 ||
+             m_cache_num_sets > 1024 || m_spm_set_stride >= m_cache_num_sets),
+             "SPM set spreading requires ordinary 64B/10-bit-slot backing "
+             "and a stride smaller than the set count");
 
     m_cache.resize(m_cache_num_sets,
                     std::vector<AbstractCacheEntry*>(m_cache_assoc, nullptr));
+    m_spm_slot_reserved.resize(
+        m_cache_num_sets, std::vector<bool>(m_cache_assoc, false));
     replacement_data.resize(m_cache_num_sets,
                                std::vector<ReplData>(m_cache_assoc, nullptr));
     // instantiate all the replacement_data here
     for (int i = 0; i < m_cache_num_sets; i++) {
         for ( int j = 0; j < m_cache_assoc; j++) {
+            if (m_spm_separate_backing && j >= m_coherent_assoc)
+                m_spm_slot_reserved[i][j] = true;
             replacement_data[i][j] =
                                 m_replacementPolicy_ptr->instantiateEntry();
         }
@@ -142,8 +160,21 @@ int64_t
 CacheMemory::addressToCacheSet(Addr address) const
 {
     assert(address == makeLineAddress(address));
+    if (m_spm_set_stride || (address & 0x08000000ULL)) {
+        const auto it = m_spm_tag_sets.find(address);
+        if (it != m_spm_tag_sets.end())
+            return it->second;
+    }
     return bitSelect(address, m_start_index_bit,
                      m_start_index_bit + m_cache_num_set_bits - 1);
+}
+
+int
+CacheMemory::spmPhysicalSet(int logical_set, int logical_way) const
+{
+    // A rotation within each way is bijective: no two logical slots alias.
+    return (logical_set + logical_way * m_spm_set_stride) &
+           (m_cache_num_sets - 1);
 }
 
 // Given a cache index: returns the index of the tag in a set.
@@ -277,9 +308,13 @@ CacheMemory::cacheAvail(Addr address) const
 
     int64_t cacheSet = addressToCacheSet(address);
 
-    // Reserved SPM ways [0, m_num_spm_ways) are never available to coherent
-    // data; start the search at the first coherent way.
-    for (int i = m_num_spm_ways; i < m_cache_assoc; i++) {
+    // A way is unavailable to coherent data only while it contains a live SPM
+    // entry.  num_spm_ways limits which physical ways software may claim; it
+    // does not statically remove those ways from coherent-cache capacity.
+    for (int i = 0; i < m_cache_assoc; i++) {
+        if (m_spm_slot_reserved[cacheSet][i]) {
+            continue;
+        }
         AbstractCacheEntry* entry = m_cache[cacheSet][i];
         if (entry != NULL) {
             if (entry->isScratchpad()) {
@@ -314,9 +349,10 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
     // Find the first open slot
     int64_t cacheSet = addressToCacheSet(address);
     std::vector<AbstractCacheEntry*> &set = m_cache[cacheSet];
-    // Skip reserved SPM ways [0, m_num_spm_ways); coherent fills only the
-    // remaining ways.
-    for (int i = m_num_spm_ways; i < m_cache_assoc; i++) {
+    for (int i = 0; i < m_cache_assoc; i++) {
+        if (m_spm_slot_reserved[cacheSet][i]) {
+            continue;
+        }
         if (set[i] && set[i]->isScratchpad()) {
             continue;
         }
@@ -336,6 +372,9 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
             set[i]->m_locked = -1;
             m_tag_index[address] = i;
             set[i]->setPosition(cacheSet, i);
+            DPRINTF(CacheFlexResidency,
+                    "CFRES ALLOC addr=%#x set=%d way=%d spm=0 entry=%p\n",
+                    address, cacheSet, i, entry);
             set[i]->replacementData = replacement_data[cacheSet][i];
             set[i]->setLastAccess(curTick());
 
@@ -370,16 +409,20 @@ CacheMemory::migrateOrClearSPMSlot(int cacheSet, int spm_way)
     if (occupant->m_Permission == AccessPermission_NotPresent ||
         occupant->m_Permission == AccessPermission_Invalid) {
         m_tag_index.erase(occupant->m_Address);
+        m_spm_tag_sets.erase(occupant->m_Address);
         m_replacementPolicy_ptr->invalidate(occupant->replacementData);
         delete occupant;
         m_cache[cacheSet][spm_way] = nullptr;
         return;
     }
 
-    // Live coherent occupant: relocate to a non-SPM way in the same set.
+    // Live coherent occupant: relocate to any currently unclaimed way in the
+    // same set.  Claimed SPM entries, rather than fixed way numbers, define
+    // the dynamically unavailable capacity.
     int new_way = -1;
-    for (int w = m_num_spm_ways; w < m_cache_assoc; w++) {
+    for (int w = 0; w < m_cache_assoc; w++) {
         if (w == spm_way) continue;
+        if (m_spm_slot_reserved[cacheSet][w]) continue;
         AbstractCacheEntry *e = m_cache[cacheSet][w];
         if (e != nullptr && e->isScratchpad()) continue;
         if (e == nullptr ||
@@ -389,7 +432,7 @@ CacheMemory::migrateOrClearSPMSlot(int cacheSet, int spm_way)
         }
     }
     panic_if(new_way == -1,
-             "No free non-SPM way in set %d for SPMCP_install migration "
+             "No free unclaimed way in set %d for SPMCP_install migration "
              "(coherent occupant at way %d, address %#x)",
              cacheSet, spm_way, occupant->m_Address);
 
@@ -397,6 +440,7 @@ CacheMemory::migrateOrClearSPMSlot(int cacheSet, int spm_way)
     if (placeholder != nullptr) {
         assert(!placeholder->isScratchpad());
         m_tag_index.erase(placeholder->m_Address);
+        m_spm_tag_sets.erase(placeholder->m_Address);
         m_replacementPolicy_ptr->invalidate(placeholder->replacementData);
         delete placeholder;
     }
@@ -405,6 +449,9 @@ CacheMemory::migrateOrClearSPMSlot(int cacheSet, int spm_way)
     // the entry, no coherence message is emitted. Replacement metadata is
     // per-slot so the moved entry adopts the new slot's data.
     m_replacementPolicy_ptr->invalidate(occupant->replacementData);
+    DPRINTF(CacheFlexResidency,
+            "CFRES MOVE addr=%#x set=%d oldway=%d way=%d\n",
+            occupant->m_Address, cacheSet, spm_way, new_way);
     m_cache[cacheSet][new_way] = occupant;
     m_cache[cacheSet][spm_way] = nullptr;
     occupant->setPosition(cacheSet, new_way);
@@ -417,6 +464,72 @@ CacheMemory::migrateOrClearSPMSlot(int cacheSet, int spm_way)
             occupant->m_Address, cacheSet, spm_way, new_way);
 }
 
+bool
+CacheMemory::prepareSPMSlot(int spm_set, int spm_way)
+{
+    const int cache_set = spmPhysicalSet(spm_set, spm_way);
+    assert(spm_way >= 0 && spm_way < m_num_spm_ways);
+    if (m_spm_separate_backing)
+        spm_way += m_coherent_assoc;
+    AbstractCacheEntry *occupant = m_cache[cache_set][spm_way];
+    if (occupant != nullptr && occupant->isScratchpad()) {
+        m_spm_slot_reserved[cache_set][spm_way] = true;
+        return true;
+    }
+
+    if (occupant == nullptr ||
+        occupant->m_Permission == AccessPermission_NotPresent ||
+        occupant->m_Permission == AccessPermission_Invalid) {
+        migrateOrClearSPMSlot(cache_set, spm_way);
+        m_spm_slot_reserved[cache_set][spm_way] = true;
+        return true;
+    }
+
+    for (int w = 0; w < m_cache_assoc; ++w) {
+        if (w == spm_way)
+            continue;
+        if (m_spm_slot_reserved[cache_set][w])
+            continue;
+        const AbstractCacheEntry *entry = m_cache[cache_set][w];
+        if (entry != nullptr && entry->isScratchpad())
+            continue;
+        if (entry == nullptr ||
+            entry->m_Permission == AccessPermission_NotPresent ||
+            entry->m_Permission == AccessPermission_Invalid) {
+            // Claim the physical slot now, not when fetched data returns.
+            // This closes the race with later coherent allocations while
+            // retaining migration whenever an unclaimed way is available.
+            migrateOrClearSPMSlot(cache_set, spm_way);
+            m_spm_slot_reserved[cache_set][spm_way] = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+void
+CacheMemory::releaseSPMSlot(Addr address)
+{
+    AbstractCacheEntry *entry = lookup(address);
+    assert(entry != nullptr && entry->isScratchpad());
+    DPRINTF(CacheFlexResidency, "CFRES RELEASE addr=%#x set=%d way=%d\n",
+            address, entry->getSet(), entry->getWay());
+    m_spm_slot_reserved[entry->getSet()][entry->getWay()] =
+        m_spm_separate_backing;
+}
+
+Addr
+CacheMemory::spmSlotVictim(int spm_set, int spm_way) const
+{
+    const int cache_set = spmPhysicalSet(spm_set, spm_way);
+    assert(spm_way >= 0 && spm_way < m_num_spm_ways);
+    panic_if(m_spm_separate_backing,
+             "Separate SPM backing must never evict a coherent occupant");
+    const AbstractCacheEntry *occupant = m_cache[cache_set][spm_way];
+    assert(occupant != nullptr && !occupant->isScratchpad());
+    return occupant->m_Address;
+}
+
 AbstractCacheEntry*
 CacheMemory::allocateSPMSlot(Addr address, int spm_set, int spm_way,
                              AbstractCacheEntry *entry)
@@ -425,15 +538,23 @@ CacheMemory::allocateSPMSlot(Addr address, int spm_set, int spm_way,
     assert(spm_set >= 0);
     assert(spm_way >= 0);
 
-    int cacheSet = addressToCacheSet(address);
-    panic_if(cacheSet != spm_set,
-             "SPM slot address %#x maps to set %d, not decoded SPM set %d",
-             address, cacheSet, spm_set);
-    panic_if(spm_way >= m_cache_assoc,
-             "SPM way %d exceeds cache associativity %d",
-             spm_way, m_cache_assoc);
+    int cacheSet = spmPhysicalSet(spm_set, spm_way);
+    // SPMSet carries the ISA's 10-bit logical slot index.  A smaller private
+    // cache uses only its implemented low set bits (256 sets in the matched
+    // W7 geometry), exactly as addressToCacheSet() does for DstSPMAddr.
+    panic_if(bitSelect(address, 6, 15) != spm_set ||
+             bitSelect(address, 16, 18) != spm_way,
+             "SPM address %#x disagrees with logical set %d way %d",
+             address, spm_set, spm_way);
+    panic_if(spm_way >= m_num_spm_ways,
+             "SPM way %d exceeds configured claimable-way count %d",
+             spm_way, m_num_spm_ways);
     panic_if(isTagPresent(address),
              "SPM slot address %#x is already present in the cache", address);
+
+    // Keep ISA addresses/logical ways unchanged; only physical backing differs.
+    if (m_spm_separate_backing)
+        spm_way += m_coherent_assoc;
 
     // Make room at the decoded slot — empty it, drop a stale placeholder, or
     // relocate a live coherent occupant to another way in the set.
@@ -448,7 +569,12 @@ CacheMemory::allocateSPMSlot(Addr address, int spm_set, int spm_way,
     entry->m_locked = -1;
     entry->setScratchpad(true);
     m_tag_index[address] = spm_way;
+    if (m_spm_set_stride || (address & 0x08000000ULL))
+        m_spm_tag_sets[address] = cacheSet;
     entry->setPosition(cacheSet, spm_way);
+    DPRINTF(CacheFlexResidency,
+            "CFRES ALLOC addr=%#x set=%d way=%d spm=1 entry=%p\n",
+            address, cacheSet, spm_way, entry);
     entry->replacementData = replacement_data[cacheSet][spm_way];
     entry->setLastAccess(curTick());
     m_replacementPolicy_ptr->reset(entry->replacementData);
@@ -456,6 +582,153 @@ CacheMemory::allocateSPMSlot(Addr address, int spm_set, int spm_way,
     DPRINTF(RubyCache, "allocating SPM slot address: %#x set: %d way: %d\n",
             address, spm_set, spm_way);
     return entry;
+}
+
+Addr
+CacheMemory::l3SPMSlot(Addr address, int index) const
+{
+    const int way = ((address >> 16) & 7) + index;
+    panic_if(way >= m_num_spm_ways || way >= 8,
+             "Shared SPM access exceeds eligible ways: %#x + %d", address, index);
+    return (address & ~Addr(0x70000)) | (Addr(way) << 16);
+}
+
+bool
+CacheMemory::prepareL3SPM(Addr address, int size)
+{
+    panic_if((address & 63) || size < 1 || size > 256 ||
+             ((address >> 6) & 1023) >= m_cache_num_sets ||
+             m_spm_separate_backing || m_num_spm_ways > m_coherent_assoc - 2,
+             "Invalid shared SPM geometry/address/length: %#x %d", address, size);
+    for (int i=0; i<(size+63)/64; ++i) {
+        const Addr slot = l3SPMSlot(address, i);
+        const int set = (slot >> 6) & 1023;
+        const int way = (slot >> 16) & 7;
+        auto *e = m_cache[set][way];
+        // Do not silently migrate live LLC directory entries. Recall using
+        // ordinary protocol eviction, including all private sharers/owners.
+        if (e && !e->isScratchpad() &&
+            e->m_Permission != AccessPermission_NotPresent &&
+            e->m_Permission != AccessPermission_Invalid) {
+            m_l3_spm_victim = e->m_Address;
+            return false;
+        }
+        prepareSPMSlot(set, way);
+    }
+    return true;
+}
+
+void
+CacheMemory::validateL3SPM(Addr address, int size) const
+{
+    panic_if((address & 63) || size < 1 || size > 256 ||
+             ((address >> 6) & 1023) >= m_cache_num_sets,
+             "Shared SPM requires aligned accesses of 1..256 bytes");
+    // Geometry must be valid, but an unclaimed read is legal and returns zero,
+    // as on the private SPM path. Speculative loop lookahead can issue it before
+    // branch resolution. readSPMData never returns a coherent occupant's bytes;
+    // stores/installations separately claim and assert scratchpad ownership.
+    for (int i=0; i<(size+63)/64; ++i)
+        l3SPMSlot(address, i);
+}
+
+Addr CacheMemory::l3ReductionConflict(Addr address, int size) const
+{
+    for(int i=0;i<(size+63)/64;++i) {
+        auto it=l3ReductionOwners.find(l3SPMSlot(address,i));
+        if(it!=l3ReductionOwners.end()) return it->second;
+    }
+    return 0;
+}
+
+void CacheMemory::l3ReductionReserve(Addr address)
+{
+    l3ReductionReserve(address,256);
+}
+
+void CacheMemory::l3ReductionReserve(Addr address, int size)
+{
+    panic_if(l3ReductionConflict(address,size),"Overlapping shared reduction capture");
+    for(int i=0;i<size/64;++i) {
+        const auto slot=l3SPMSlot(address,i);
+        auto *e=lookup(slot);
+        panic_if(!e || !e->isScratchpad(),"Shared reduction destination not claimed: %#x",slot);
+        l3ReductionOwners.emplace(slot,address);
+    }
+}
+
+void CacheMemory::l3ReductionRelease(Addr address)
+{
+    l3ReductionRelease(address,256);
+}
+
+void CacheMemory::l3ReductionRelease(Addr address, int size)
+{
+    for(int i=0;i<size/64;++i) {
+        const auto slot=l3SPMSlot(address,i);
+        panic_if(l3ReductionOwners.at(slot)!=address,"Lost reduction slot lock");
+        l3ReductionOwners.erase(slot);
+    }
+}
+
+void CacheMemory::l3ReductionStart(int active)
+{
+    ++cacheMemoryStats.l3ReductionStarts;
+    cacheMemoryStats.l3ReductionMaxActive = std::max<double>(
+        cacheMemoryStats.l3ReductionMaxActive.value(), active);
+}
+
+void CacheMemory::l3ReductionFinish()
+{
+    ++cacheMemoryStats.l3ReductionFinishes;
+}
+
+DataBlock CacheMemory::l3ReductionResult(Addr address, const DataBlock& contribution, Addr scale)
+{
+    // Called by the timed bank pipeline. Result stays in its bounded TBE until
+    // the modeled read/ALU delay expires; no write to the array happens here.
+    const bool initialize=scale & (Addr(1) << 56);
+    DataBlock result(256);
+    if (initialize) {
+        result.clear();
+        ++cacheMemoryStats.l3ReductionInitializations;
+    } else result=readSPMData(address,256);
+    const bool half = scale & (Addr(1) << 58);
+    if (half) ++cacheMemoryStats.l3ReductionHalfCommands;
+    const auto rounding=softfloat_roundingMode, flags=softfloat_exceptionFlags;
+    softfloat_roundingMode=softfloat_round_near_even;
+    for(int i=0;i<64;++i) {
+        float32_t old, add;
+        std::memcpy(&old.v,result.getData(4*i,4),4);
+        if (half) {
+            float16_t narrow;
+            std::memcpy(&narrow.v,contribution.getData(2*i,2),2);
+            add=f16_to_f32(narrow);
+        } else {
+            std::memcpy(&add.v,contribution.getData(4*i,4),4);
+        }
+        auto v=f32_add(f32_mul(old,float32_t{uint32_t(scale)}),add);
+        result.setData(reinterpret_cast<uint8_t*>(&v.v),4*i,4);
+    }
+    softfloat_roundingMode=rounding;softfloat_exceptionFlags=flags;
+    return result;
+}
+
+DataBlock CacheMemory::l3FinalizeResult(Addr address, Addr scale)
+{
+    auto old=readSPMData(address,128);
+    DataBlock result(64);result.clear();
+    const auto rounding=softfloat_roundingMode, flags=softfloat_exceptionFlags;
+    softfloat_roundingMode=softfloat_round_near_even;
+    for(int i=0;i<32;++i) {
+        float32_t x;
+        std::memcpy(&x.v,old.getData(4*i,4),4);
+        auto value=f32_to_f16(f32_mul(x,float32_t{uint32_t(scale)}));
+        result.setData(reinterpret_cast<uint8_t*>(&value.v),2*i,2);
+    }
+    softfloat_roundingMode=rounding;softfloat_exceptionFlags=flags;
+    ++cacheMemoryStats.l3Finalizations;
+    return result;
 }
 
 DataBlock
@@ -471,7 +744,6 @@ CacheMemory::readSPMData(Addr address, int size)
 
     const Addr base_addr = makeLineAddress(address);
     const int start_way = static_cast<int>((base_addr >> 16) & 0x7);
-    const int set = static_cast<int>((base_addr >> 6) & 0x3ff);
     const int first_offset = static_cast<int>(address & (m_block_size - 1));
 
     int copied = 0;
@@ -481,16 +753,15 @@ CacheMemory::readSPMData(Addr address, int size)
         const int bytes = std::min(m_block_size - slot_offset, size - copied);
         const int way = start_way + slot_index;
 
-        panic_if(way >= m_cache_assoc,
+        panic_if(way >= m_coherent_assoc,
                  "SPM read at %#x size %d crosses beyond way %d",
                  address, size, way);
 
         const Addr slot_addr =
             (base_addr & ~(static_cast<Addr>(0x7) << 16)) |
             (static_cast<Addr>(way) << 16);
-        panic_if(addressToCacheSet(slot_addr) != set,
-                 "SPM wide read slot %#x changed set from %d to %d",
-                 slot_addr, set, addressToCacheSet(slot_addr));
+        // Each vector lane group retains its logical slot. With set spreading
+        // enabled, different ways deliberately use different physical sets.
 
         AbstractCacheEntry *entry = lookup(slot_addr);
         if (entry != nullptr && entry->isScratchpad()) {
@@ -508,6 +779,20 @@ CacheMemory::readSPMData(Addr address, int size)
 void
 CacheMemory::writeSPMData(Addr address, const DataBlock& data, int size)
 {
+    writeSPMDataImpl(address, data, size, nullptr);
+}
+
+void
+CacheMemory::writeSPMDataMasked(Addr address, const DataBlock& data, int size,
+                                const WriteMask& mask)
+{
+    writeSPMDataImpl(address, data, size, &mask);
+}
+
+void
+CacheMemory::writeSPMDataImpl(Addr address, const DataBlock& data, int size,
+                              const WriteMask* mask)
+{
     if (size <= 0) {
         size = m_block_size;
     }
@@ -515,7 +800,6 @@ CacheMemory::writeSPMData(Addr address, const DataBlock& data, int size)
 
     const Addr base_addr = makeLineAddress(address);
     const int start_way = static_cast<int>((base_addr >> 16) & 0x7);
-    const int set = static_cast<int>((base_addr >> 6) & 0x3ff);
     const int first_offset = static_cast<int>(address & (m_block_size - 1));
 
     int copied = 0;
@@ -525,24 +809,32 @@ CacheMemory::writeSPMData(Addr address, const DataBlock& data, int size)
         const int bytes = std::min(m_block_size - slot_offset, size - copied);
         const int way = start_way + slot_index;
 
-        panic_if(way >= m_cache_assoc,
+        panic_if(way >= m_coherent_assoc,
                  "SPM write at %#x size %d crosses beyond way %d",
                  address, size, way);
 
         const Addr slot_addr =
             (base_addr & ~(static_cast<Addr>(0x7) << 16)) |
             (static_cast<Addr>(way) << 16);
-        panic_if(addressToCacheSet(slot_addr) != set,
-                 "SPM wide write slot %#x changed set from %d to %d",
-                 slot_addr, set, addressToCacheSet(slot_addr));
 
         AbstractCacheEntry *entry = lookup(slot_addr);
         panic_if(entry == nullptr || !entry->isScratchpad(),
                  "SPM write at %#x maps to absent/non-SPM slot %#x",
                  address, slot_addr);
 
-        entry->getDataBlk().setData(data.getData(slot_offset, bytes),
-                                    slot_offset, bytes);
+        // Request payload is contiguous; slot_offset resets for each bank,
+        // but its source offset must advance across the entire vector.
+        if (mask) {
+            for (int i = 0; i < bytes; ++i) {
+                const int source = first_offset + copied + i;
+                if (mask->test(source))
+                    entry->getDataBlk().setByte(slot_offset + i,
+                                               data.getByte(source));
+            }
+        } else {
+            entry->getDataBlk().setData(data.getData(first_offset + copied, bytes),
+                                        slot_offset, bytes);
+        }
 
         copied += bytes;
         ++slot_index;
@@ -560,9 +852,14 @@ CacheMemory::deallocate(Addr address)
     m_replacementPolicy_ptr->invalidate(entry->replacementData);
     uint32_t cache_set = entry->getSet();
     uint32_t way = entry->getWay();
+    DPRINTF(CacheFlexResidency,
+            "CFRES REMOVE addr=%#x set=%d way=%d permission=%s\n",
+            address, cache_set, way,
+            AccessPermission_to_string(entry->m_Permission));
     delete entry;
     m_cache[cache_set][way] = NULL;
     m_tag_index.erase(address);
+    m_spm_tag_sets.erase(address);
 }
 
 // Returns with the physical address of the conflicting cache line
@@ -574,9 +871,12 @@ CacheMemory::cacheProbe(Addr address) const
 
     int64_t cacheSet = addressToCacheSet(address);
     std::vector<ReplaceableEntry*> candidates;
-    // Only coherent ways [m_num_spm_ways, assoc) are replacement candidates;
-    // reserved SPM ways are skipped (and may be null before being claimed).
-    for (int i = m_num_spm_ways; i < m_cache_assoc; i++) {
+    // Every unclaimed way is a coherent replacement candidate.  A claimed
+    // SPM entry is never offered to the replacement policy.
+    for (int i = 0; i < m_cache_assoc; i++) {
+        if (m_spm_slot_reserved[cacheSet][i]) {
+            continue;
+        }
         if (m_cache[cacheSet][i]->isScratchpad()) {
             continue;
         }
@@ -592,6 +892,9 @@ CacheMemory::cacheProbe(Addr address) const
     panic_if(victim_entry->isScratchpad(),
              "Replacement selected SPM line %#x in set %d way %d",
              victim_entry->m_Address, cacheSet, victim->getWay());
+    DPRINTF(CacheFlexResidency,
+            "CFRES PROBE incoming=%#x victim=%#x set=%d way=%d\n",
+            address, victim_entry->m_Address, cacheSet, victim->getWay());
     return victim_entry->m_Address;
 }
 
@@ -782,6 +1085,12 @@ CacheMemory::
 CacheMemoryStats::CacheMemoryStats(statistics::Group *parent)
     : statistics::Group(parent),
       ADD_STAT(numDataArrayReads, "Number of data array reads"),
+      ADD_STAT(l3ReductionStarts, "Shared reduction SRAM reads launched"),
+      ADD_STAT(l3ReductionFinishes, "Shared reduction SRAM writes completed"),
+      ADD_STAT(l3ReductionMaxActive, "Maximum overlapping bank reductions"),
+      ADD_STAT(l3ReductionHalfCommands, "Typed FP16 contributions widened exactly at bank"),
+      ADD_STAT(l3ReductionInitializations, "First contributions initialize without accumulator SRAM reads"),
+      ADD_STAT(l3Finalizations, "128B FP32 normalized/converted into 64B coherent writeback payload"),
       ADD_STAT(numDataArrayWrites, "Number of data array writes"),
       ADD_STAT(numTagArrayReads, "Number of tag array reads"),
       ADD_STAT(numTagArrayWrites, "Number of tag array writes"),

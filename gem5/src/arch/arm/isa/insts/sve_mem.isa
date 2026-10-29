@@ -2715,7 +2715,7 @@ let {{
             ['IsStore'])
 
         header_output += SveContigMemSIOpDeclare.subst(spmLdIop)
-        header_output += SveContigMemSIOpDeclare.subst(spmStIop)
+        header_output += SpmStoreSIOpDeclare.subst(spmStIop)
         exec_output += (
             SveContigLoadExecute.subst(spmLdIop) +
             SveContigLoadInitiateAcc.subst(spmLdIop) +

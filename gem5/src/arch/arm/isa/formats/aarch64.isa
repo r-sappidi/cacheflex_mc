@@ -65,6 +65,25 @@ namespace Aarch64
         if ((machInst & 0x0000FFFF) == 0x0110)
             return new Gem5Op64(machInst);
 
+        // SPMCPB3_64: op=copy, size/ext=64 B, reserved addrMd=3.
+        // Match the fixed opcode fields before generic element-size decoding.
+        if ((machInst & 0x00FF0000) == 0x00BF0000) {
+            const RegIndex batch_base = makeSP(
+                (RegIndex)(uint8_t)bits(machInst, 9, 5));
+            const RegIndex batch_dest =
+                (RegIndex)(uint8_t)bits(machInst, 4, 0);
+            return new SPMCP_BATCH3_64(
+                machInst, batch_dest, batch_base, 0);
+        }
+        // SPMDMA_2D_64: one descriptor launches a strided panel transfer.
+        if ((machInst & 0x00FF0000) == 0x00BE0000) {
+            const RegIndex dma_base = makeSP(
+                (RegIndex)(uint8_t)bits(machInst, 9, 5));
+            const RegIndex dma_desc =
+                (RegIndex)(uint8_t)bits(machInst, 4, 0);
+            return new SPMDMA_2D_64(machInst, dma_desc, dma_base, 0);
+        }
+
         const uint8_t op = bits(machInst, 23, 22);
         const uint8_t size2 = bits(machInst, 21, 20);
         const uint8_t addrMd = bits(machInst, 19, 18);
@@ -99,6 +118,14 @@ namespace Aarch64
         }
 
         switch (op) {
+          case 0x0:
+            switch (elemBytes) {
+              case 1: SPM_ADDRMODE(SPMLDR_1); break;
+              case 2: SPM_ADDRMODE(SPMLDR_2); break;
+              case 4: SPM_ADDRMODE(SPMLDR_4); break;
+              case 8: SPM_ADDRMODE(SPMLDR_8); break;
+            }
+            break;
           case 0x1:
             if (ext2 == 0x3) {
                 switch (elemBytes) {
@@ -3951,9 +3978,11 @@ def format Aarch64() {{
             return decodeDataProcReg(machInst);
         } else if (bits(machInst, 24) == 1 &&
                    bits(machInst, 31, 28) == 0xF) {
-            if (bits(machInst, 23, 22) >= 1)
-                return decodeSPM(machInst);
-            return new Gem5Op64(machInst);
+            // Scalar SPM loads use op=0. decodeSPM retains the exact
+            // low-16-bit gem5 pseudo-op escape, so route the whole reserved
+            // encoding space through it rather than misdecoding SPM loads as
+            // arbitrary m5ops.
+            return decodeSPM(machInst);
         } else {
             // bit 27:25=111
             switch(decoderFlavor){

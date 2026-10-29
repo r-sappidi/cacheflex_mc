@@ -1,7 +1,6 @@
 /*
  * Copyright (c) 2011-2013, 2016-2020 ARM Limited
  * Copyright (c) 2013 Advanced Micro Devices, Inc.
- * Copyright (c) 2022-2023 The University of Edinburgh
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -52,22 +51,20 @@
 
 #include "arch/generic/pcstate.hh"
 #include "base/statistics.hh"
-#include "cpu/activity.hh"
-#include "cpu/base.hh"
-#include "cpu/o3/bac.hh"
 #include "cpu/o3/comm.hh"
 #include "cpu/o3/commit.hh"
 #include "cpu/o3/decode.hh"
 #include "cpu/o3/dyn_inst_ptr.hh"
 #include "cpu/o3/fetch.hh"
 #include "cpu/o3/free_list.hh"
-#include "cpu/o3/ftq.hh"
 #include "cpu/o3/iew.hh"
 #include "cpu/o3/limits.hh"
 #include "cpu/o3/rename.hh"
 #include "cpu/o3/rob.hh"
 #include "cpu/o3/scoreboard.hh"
 #include "cpu/o3/thread_state.hh"
+#include "cpu/activity.hh"
+#include "cpu/base.hh"
 #include "cpu/simple_thread.hh"
 #include "cpu/timebuf.hh"
 #include "params/BaseO3CPU.hh"
@@ -286,13 +283,6 @@ class CPU : public BaseCPU
     /** Get the current instruction sequence number, and increment it. */
     InstSeqNum getAndIncrementInstSeq() { return globalSeqNum++; }
 
-    /** Get the current fetch target sequence number, and increment it. */
-    InstSeqNum
-    getAndIncrementFTSeq()
-    {
-        return globalFTSeqNum++;
-    }
-
     /** Traps to handle given fault. */
     void trap(const Fault &fault, ThreadID tid, const StaticInstPtr &inst);
 
@@ -411,12 +401,6 @@ class CPU : public BaseCPU
     bool removeInstsThisCycle;
 
   protected:
-    /** The branch and PC address calculation stage. */
-    BAC bac;
-
-    /** The Fetch taget queue. */
-    FTQ ftq;
-
     /** The fetch stage. */
     Fetch fetch;
 
@@ -469,7 +453,6 @@ class CPU : public BaseCPU
      */
     enum StageIdx
     {
-        BACIdx,
         FetchIdx,
         DecodeIdx,
         RenameIdx,
@@ -526,14 +509,6 @@ class CPU : public BaseCPU
     /** Gets a free thread id. Use if thread ids change across system. */
     ThreadID getFreeTid();
 
-    /**
-     * Get whether a thread is in user mode.
-     *
-     * @param tid The thread id
-     * @return true if the thread is in user mode, false otherwise
-     */
-    bool inUserMode(ThreadID tid);
-
   public:
     /** Returns a pointer to a thread context. */
     gem5::ThreadContext *
@@ -543,10 +518,7 @@ class CPU : public BaseCPU
     }
 
     /** The global sequence number counter. */
-    InstSeqNum globalSeqNum;
-
-    /** The global FT sequence number counter. */
-    FTSeqNum globalFTSeqNum;
+    InstSeqNum globalSeqNum;//[MaxThreads];
 
     /** Pointer to the checker, which can dynamically verify
      * instruction results at run time.  This can be set to NULL if it
@@ -597,17 +569,19 @@ class CPU : public BaseCPU
     /** Get the dcache port (used to find block size for translations). */
     Port &
     getDataPort() override
-    {
+    {   
+
         return iew.ldstQueue.getDataPort();
     }
 
+    // weihang
     Port &
     getSpmPort()
-    {
+    {   
         return iew.ldstQueue.getSpmPort();
     }
-
-    Port &getPort(const std::string &if_name,
+    // Override getPort to handle SPM port requests
+    Port &getPort(const std::string &if_name, 
                   PortID idx = InvalidPortID) override;
 
     struct CPUStats : public statistics::Group

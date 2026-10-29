@@ -1,4 +1,4 @@
-# Copyright (c) 2010, 2017, 2020, 2024-2025 Arm Limited
+# Copyright (c) 2010, 2017, 2020, 2024 Arm Limited
 # All rights reserved.
 #
 # The license below extends only to copyright in the software and shall
@@ -61,7 +61,6 @@ class FP_ALU(FUDesc):
         OpDesc(opClass="FloatAdd", opLat=2),
         OpDesc(opClass="FloatCmp", opLat=2),
         OpDesc(opClass="FloatCvt", opLat=2),
-        OpDesc(opClass="Bf16Cvt", opLat=2),
     ]
     count = 4
 
@@ -79,58 +78,123 @@ class FP_MultDiv(FUDesc):
 
 class SIMD_Unit(FUDesc):
     opList = [
-        OpDesc(opClass="SimdAdd"),
-        OpDesc(opClass="SimdAddAcc"),
-        OpDesc(opClass="SimdAlu"),
-        OpDesc(opClass="SimdCmp"),
-        OpDesc(opClass="SimdCvt"),
-        OpDesc(opClass="SimdMisc"),
-        OpDesc(opClass="SimdMult"),
-        OpDesc(opClass="SimdMultAcc"),
-        OpDesc(opClass="SimdMatMultAcc"),
-        OpDesc(opClass="SimdShift"),
-        OpDesc(opClass="SimdShiftAcc"),
-        OpDesc(opClass="SimdDiv"),
-        OpDesc(opClass="SimdSqrt"),
-        OpDesc(opClass="SimdFloatAdd"),
-        OpDesc(opClass="SimdFloatAlu"),
-        OpDesc(opClass="SimdFloatCmp"),
-        OpDesc(opClass="SimdFloatCvt"),
-        OpDesc(opClass="SimdFloatDiv"),
-        OpDesc(opClass="SimdFloatMisc"),
-        OpDesc(opClass="SimdFloatMult"),
-        OpDesc(opClass="SimdFloatMultAcc"),
-        OpDesc(opClass="SimdFloatMatMultAcc"),
-        OpDesc(opClass="SimdFloatSqrt"),
-        OpDesc(opClass="SimdReduceAdd"),
-        OpDesc(opClass="SimdReduceAlu"),
-        OpDesc(opClass="SimdReduceCmp"),
-        OpDesc(opClass="SimdFloatReduceAdd"),
-        OpDesc(opClass="SimdFloatReduceCmp"),
-        OpDesc(opClass="SimdExt"),
-        OpDesc(opClass="SimdFloatExt"),
-        OpDesc(opClass="SimdConfig"),
-        OpDesc(opClass="SimdDotProd"),
-        OpDesc(opClass="SimdAes"),
-        OpDesc(opClass="SimdAesMix"),
-        OpDesc(opClass="SimdSha1Hash"),
-        OpDesc(opClass="SimdSha1Hash2"),
-        OpDesc(opClass="SimdSha256Hash"),
-        OpDesc(opClass="SimdSha256Hash2"),
-        OpDesc(opClass="SimdShaSigma2"),
-        OpDesc(opClass="SimdShaSigma3"),
-        OpDesc(opClass="SimdSha3"),
-        OpDesc(opClass="SimdSm4e"),
-        OpDesc(opClass="SimdCrc"),
-        OpDesc(opClass="SimdBf16Add"),
-        OpDesc(opClass="SimdBf16Cmp"),
-        OpDesc(opClass="SimdBf16Cvt"),
-        OpDesc(opClass="SimdBf16DotProd"),
-        OpDesc(opClass="SimdBf16MatMultAcc"),
-        OpDesc(opClass="SimdBf16Mult"),
-        OpDesc(opClass="SimdBf16MultAcc"),
+        # Non-pipelined (blocking)
+        OpDesc(opClass="SimdDiv",      opLat=12, pipelined=False),
+        OpDesc(opClass="SimdSqrt",     opLat=12, pipelined=False),
+        OpDesc(opClass="SimdFloatDiv", opLat=10, pipelined=False),
+        OpDesc(opClass="SimdFloatSqrt",opLat=12, pipelined=False),
+        # Integer SIMD (pipelined)
+        OpDesc(opClass="SimdAdd",        opLat=2),
+        OpDesc(opClass="SimdAddAcc",     opLat=2),
+        OpDesc(opClass="SimdAlu",        opLat=2),
+        OpDesc(opClass="SimdCmp",        opLat=2),
+        OpDesc(opClass="SimdCvt",        opLat=2),
+        OpDesc(opClass="SimdShift",      opLat=2),
+        OpDesc(opClass="SimdShiftAcc",   opLat=2),
+        OpDesc(opClass="SimdMisc",       opLat=2),
+        OpDesc(opClass="SimdConfig",     opLat=1),
+        OpDesc(opClass="SimdMult",       opLat=4),
+        OpDesc(opClass="SimdMultAcc",    opLat=4),
+        OpDesc(opClass="SimdMatMultAcc", opLat=5),
+        # Float SIMD (pipelined)
+        OpDesc(opClass="SimdFloatAdd",        opLat=3),
+        OpDesc(opClass="SimdFloatAlu",        opLat=3),
+        OpDesc(opClass="SimdFloatCmp",        opLat=3),
+        OpDesc(opClass="SimdFloatCvt",        opLat=3),
+        OpDesc(opClass="SimdFloatMisc",       opLat=3),
+        OpDesc(opClass="SimdFloatMult",       opLat=4),
+        OpDesc(opClass="SimdFloatMultAcc",    opLat=4),   # FMLA: 4-cycle latency
+        OpDesc(opClass="SimdFloatMatMultAcc", opLat=5),
+        # Reduction (tree reduction — non-pipelined: FU blocked for opLat cycles)
+        # pipelined=False: new reduction cannot issue until previous finishes
+        OpDesc(opClass="SimdReduceAdd",      opLat=4, pipelined=False),
+        OpDesc(opClass="SimdReduceAlu",      opLat=4, pipelined=False),
+        OpDesc(opClass="SimdReduceCmp",      opLat=3, pipelined=False),
+        OpDesc(opClass="SimdFloatReduceAdd", opLat=6, pipelined=False),  # svaddv FP16→scalar
+        OpDesc(opClass="SimdFloatReduceCmp", opLat=4, pipelined=False),
+        # Extensions / crypto
+        OpDesc(opClass="SimdExt",       opLat=3),
+        OpDesc(opClass="SimdFloatExt",  opLat=3),
+        OpDesc(opClass="SimdAes",       opLat=2),
+        OpDesc(opClass="SimdAesMix",    opLat=2),
+        OpDesc(opClass="SimdSha1Hash",  opLat=2),
+        OpDesc(opClass="SimdSha1Hash2", opLat=2),
+        OpDesc(opClass="SimdSha256Hash",opLat=2),
+        OpDesc(opClass="SimdSha256Hash2",opLat=2),
+        OpDesc(opClass="SimdShaSigma2", opLat=2),
+        OpDesc(opClass="SimdShaSigma3", opLat=2),
     ]
     count = 4
+
+
+#jq86
+# class SIMD_Unit(FUDesc):
+#     opList = [
+#         # ==========================================
+#         # 1. 非流水线操作 (Blocking / Iterative)
+#         # ==========================================
+#         # 这些单元在计算完成前不能接收新指令
+        
+#         # --- 向量 (SVE/NEON) 除法与开方 ---
+#         OpDesc(opClass='SimdDiv', opLat=12, pipelined=False),
+#         OpDesc(opClass='SimdSqrt', opLat=12, pipelined=False),
+#         OpDesc(opClass='SimdFloatDiv', opLat=10, pipelined=False),
+#         OpDesc(opClass='SimdFloatSqrt', opLat=12, pipelined=False),
+
+#         # --- 标量 (Scalar) 开方 [你要求的补充] ---
+#         # 注意：如果你添加了标量开方，通常也应该在这里添加标量除法 (FloatDiv)
+#         OpDesc(opClass='FloatSqrt', opLat=24, pipelined=False),
+#         OpDesc(opClass='FloatDiv', opLat=20, pipelined=False), # 建议同时加上这个
+
+#         # ==========================================
+#         # 2. 全流水线操作 (Fully Pipelined)
+#         # ==========================================
+#         # SVE 核心谓词逻辑
+#         OpDesc(opClass='SimdPredAlu', opLat=2), 
+
+#         # 向量整数运算
+#         OpDesc(opClass='SimdAdd', opLat=2),
+#         OpDesc(opClass='SimdAddAcc', opLat=2),
+#         OpDesc(opClass='SimdAlu', opLat=2),
+#         OpDesc(opClass='SimdCmp', opLat=2),
+#         OpDesc(opClass='SimdShift', opLat=2),
+#         OpDesc(opClass='SimdShiftAcc', opLat=2),
+#         OpDesc(opClass='SimdMisc', opLat=2),
+#         OpDesc(opClass='SimdConfig', opLat=1),
+#         OpDesc(opClass='SimdMult', opLat=4),
+#         OpDesc(opClass='SimdMultAcc', opLat=4),
+#         OpDesc(opClass='SimdMatMultAcc', opLat=5),
+
+#         # 向量浮点运算
+#         OpDesc(opClass='SimdFloatAdd', opLat=3),
+#         OpDesc(opClass='SimdFloatAlu', opLat=3),
+#         OpDesc(opClass='SimdFloatCmp', opLat=3),
+#         OpDesc(opClass='SimdFloatCvt', opLat=3),
+#         OpDesc(opClass='SimdFloatMisc', opLat=3),
+#         OpDesc(opClass='SimdFloatMult', opLat=4),
+#         OpDesc(opClass='SimdFloatMultAcc', opLat=4),
+#         OpDesc(opClass='SimdFloatMatMultAcc', opLat=5),
+        
+#         # 向量规约
+#         OpDesc(opClass='SimdReduceAdd', opLat=4),
+#         OpDesc(opClass='SimdReduceAlu', opLat=4),
+#         OpDesc(opClass='SimdReduceCmp', opLat=3),
+#         OpDesc(opClass='SimdFloatReduceAdd', opLat=6),
+#         OpDesc(opClass='SimdFloatReduceCmp', opLat=4),
+
+#         # 加密扩展
+#         OpDesc(opClass='SimdExt', opLat=3),
+#         OpDesc(opClass='SimdFloatExt', opLat=3),
+#         OpDesc(opClass='SimdAes', opLat=2),
+#         OpDesc(opClass='SimdAesMix', opLat=2),
+#         OpDesc(opClass='SimdSha1Hash', opLat=2),
+#         OpDesc(opClass='SimdSha256Hash', opLat=2),
+#         OpDesc(opClass='SimdShaSigma2', opLat=2),
+#         OpDesc(opClass='SimdShaSigma3', opLat=2),
+#     ]
+#     count = 4
+
+
 
 
 class Matrix_Unit(FUDesc):
@@ -139,11 +203,6 @@ class Matrix_Unit(FUDesc):
         OpDesc(opClass="MatrixMov"),
         OpDesc(opClass="MatrixOP"),
     ]
-    count = 1
-
-
-class System_Unit(FUDesc):
-    opList = [OpDesc(opClass="System")]
     count = 1
 
 
@@ -158,13 +217,10 @@ class ReadPort(FUDesc):
         OpDesc(opClass="FloatMemRead"),
         OpDesc(opClass="SimdUnitStrideLoad"),
         OpDesc(opClass="SimdUnitStrideMaskLoad"),
-        OpDesc(opClass="SimdUnitStrideSegmentedLoad"),
         OpDesc(opClass="SimdStridedLoad"),
         OpDesc(opClass="SimdIndexedLoad"),
         OpDesc(opClass="SimdUnitStrideFaultOnlyFirstLoad"),
-        OpDesc(opClass="SimdUnitStrideSegmentedFaultOnlyFirstLoad"),
         OpDesc(opClass="SimdWholeRegisterLoad"),
-        OpDesc(opClass="SimdStrideSegmentedLoad"),
     ]
     count = 0
 
@@ -175,11 +231,9 @@ class WritePort(FUDesc):
         OpDesc(opClass="FloatMemWrite"),
         OpDesc(opClass="SimdUnitStrideStore"),
         OpDesc(opClass="SimdUnitStrideMaskStore"),
-        OpDesc(opClass="SimdUnitStrideSegmentedStore"),
         OpDesc(opClass="SimdStridedStore"),
         OpDesc(opClass="SimdIndexedStore"),
         OpDesc(opClass="SimdWholeRegisterStore"),
-        OpDesc(opClass="SimdStrideSegmentedStore"),
     ]
     count = 0
 
@@ -194,17 +248,19 @@ class RdWrPort(FUDesc):
         OpDesc(opClass="SimdUnitStrideStore"),
         OpDesc(opClass="SimdUnitStrideMaskLoad"),
         OpDesc(opClass="SimdUnitStrideMaskStore"),
-        OpDesc(opClass="SimdUnitStrideSegmentedLoad"),
-        OpDesc(opClass="SimdUnitStrideSegmentedStore"),
         OpDesc(opClass="SimdStridedLoad"),
         OpDesc(opClass="SimdStridedStore"),
         OpDesc(opClass="SimdIndexedLoad"),
         OpDesc(opClass="SimdIndexedStore"),
         OpDesc(opClass="SimdUnitStrideFaultOnlyFirstLoad"),
-        OpDesc(opClass="SimdUnitStrideSegmentedFaultOnlyFirstLoad"),
         OpDesc(opClass="SimdWholeRegisterLoad"),
         OpDesc(opClass="SimdWholeRegisterStore"),
-        OpDesc(opClass="SimdStrideSegmentedLoad"),
-        OpDesc(opClass="SimdStrideSegmentedStore"),
     ]
     count = 4
+
+
+class IprPort(FUDesc):
+    # IprAccess was renamed to System in this gem5 base. This preserves the
+    # micro configuration's single non-pipelined system-register FU.
+    opList = [OpDesc(opClass="System", opLat=3, pipelined=False)]
+    count = 1

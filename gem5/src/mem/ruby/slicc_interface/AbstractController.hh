@@ -43,6 +43,8 @@
 
 #include <exception>
 #include <iostream>
+#include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -56,6 +58,7 @@
 #include "mem/ruby/common/DataBlock.hh"
 #include "mem/ruby/common/Histogram.hh"
 #include "mem/ruby/common/MachineID.hh"
+#include "mem/ruby/slicc_interface/FlightRecorder.hh"
 #include "mem/ruby/network/MessageBuffer.hh"
 #include "mem/ruby/protocol/AccessPermission.hh"
 #include "mem/ruby/system/CacheRecorder.hh"
@@ -88,6 +91,34 @@ class AbstractController : public ClockedObject, public Consumer
     PARAMS(RubyController);
     AbstractController(const Params &p);
     void init();
+
+    bool flightRecorderEnabled() const { return bool(flightRecorder); }
+    void recordFlightTransition(const std::string &event,
+        const std::string &state, const std::string &next, Addr addr,
+        const std::string &outcome)
+    {
+        if (!flightRecorder) return;
+        std::ostringstream text;
+        text << "TRANSITION event=" << event << " state=" << state
+             << " next=" << next << " address=0x" << std::hex << addr
+             << " outcome=" << outcome;
+        flightRecorder->append(curTick(), text.str());
+    }
+    template<class MessageType>
+    void recordFlightMessage(const char *kind, const char *queue,
+                             const MessageType &message)
+    {
+        if (!flightRecorder || !flightMessages) return;
+        std::ostringstream text;
+        text << kind << " queue=" << queue << ' ' << message;
+        flightRecorder->append(curTick(), text.str());
+    }
+
+  private:
+    std::unique_ptr<FlightRecorder> flightRecorder;
+    bool flightMessages = false;
+
+  public:
 
     NodeID getVersion() const { return m_machineID.getNum(); }
     MachineType getType() const { return m_machineID.getType(); }

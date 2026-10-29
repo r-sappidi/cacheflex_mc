@@ -55,6 +55,7 @@ structure(MessageBuffer, buffer="yes", inport="yes", outport="yes",
   // in debug traces dumped by the protocol.
   bool areNSlotsAvailable(int n, Tick curTime);
   int getSize(Tick curTime);
+  bool tryIngressBypass(Tick current_time);
 }
 
 external_type(Scalar, primitive="yes");
@@ -179,13 +180,17 @@ structure(RubyRequest, desc="...", interface="Message", external="yes") {
   PrefetchBit Prefetch,      desc="Is this a prefetch request";
   int contextId,             desc="this goes away but must be replace with Nilay";
   WriteMask writeMask,       desc="Writethrough mask";
+  bool SPMMasked, default="false", desc="SPM store has disabled byte lanes";
   DataBlock WTData,          desc="Writethrough data block";
   int wfid,                  desc="Writethrough wavefront";
   uint64_t instSeqNum,       desc="Instruction sequence number";
   Addr SrcAddr,              default="0", desc="C6: coherent source address for SPM operations";
+  Addr L3Finalize, default="0", desc="Finalization command marker and FP32 scale";
   Addr DstSPMAddr,           default="0", desc="C6: encoded destination SPM slot address";
   int SPMSet,                default="0", desc="C6: decoded SPM set index";
   int SPMWay,                default="0", desc="C6: decoded SPM way id";
+  int SPMMulticastMask,      default="0", desc="CacheFlex destination-core mask";
+  bool SPMMulticastClaim,    default="false", desc="Reserve multicast SPM destinations without fetching data";
   PacketPtr pkt,             desc="Packet associated with this request";
   bool htmFromTransaction,   desc="Memory request originates within a HTM transaction";
   int htmTransactionUid,     desc="Used to identify the unique HTM transaction that produced this request";
@@ -216,12 +221,29 @@ structure (DirectoryMemory, external = "yes") {
 structure (CacheMemory, external = "yes") {
   bool cacheAvail(Addr);
   Addr cacheProbe(Addr);
+  bool prepareSPMSlot(int, int);
+  bool prepareL3SPM(Addr, int);
+  Addr l3SPMVictim();
+  Addr l3SPMSlot(Addr, int);
+  void validateL3SPM(Addr, int);
+  Addr l3ReductionConflict(Addr, int);
+  void l3ReductionReserve(Addr);
+  void l3ReductionRelease(Addr);
+  void l3ReductionReserve(Addr, int);
+  void l3ReductionRelease(Addr, int);
+  DataBlock l3FinalizeResult(Addr, Addr);
+  DataBlock l3ReductionResult(Addr, DataBlock, Addr);
+  void l3ReductionStart(int);
+  void l3ReductionFinish();
+  Addr spmSlotVictim(int, int);
+  void releaseSPMSlot(Addr);
   AbstractCacheEntry getNullEntry();
   AbstractCacheEntry allocate(Addr, AbstractCacheEntry);
   AbstractCacheEntry allocate(Addr, AbstractCacheEntry, bool);
   AbstractCacheEntry allocateSPMSlot(Addr, int, int, AbstractCacheEntry);
   DataBlock readSPMData(Addr, int);
   void writeSPMData(Addr, DataBlock, int);
+  void writeSPMDataMasked(Addr, DataBlock, int, WriteMask);
   void allocateVoid(Addr, AbstractCacheEntry);
   void deallocate(Addr);
   AbstractCacheEntry lookup(Addr);
@@ -257,6 +279,13 @@ structure (DMASequencer, external = "yes") {
   void dataCallback(DataBlock,Addr);
   void atomicCallback(DataBlock,Addr);
   void recordRequestType(CacheRequestType);
+}
+
+structure(MicroResourcePool, external="yes") {
+    bool full();
+    bool contains(Addr);
+    void allocate(Addr);
+    void release(Addr);
 }
 
 structure (TimerTable, inport="yes", external = "yes") {

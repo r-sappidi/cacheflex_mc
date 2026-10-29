@@ -781,8 +781,8 @@ UndefinedInstruction::invoke(ThreadContext *tc, const StaticInstPtr &inst)
         panic("Attempted to execute disabled instruction "
                 "'%s' (inst 0x%08x)", mnemonic, arm_inst->encoding());
     } else if (unknown) {
-        panic("Attempted to execute unknown instruction (inst 0x%08x)",
-              arm_inst->encoding());
+        panic("Attempted to execute unknown instruction (inst 0x%08x) "
+              "at pc %s", arm_inst->encoding(), tc->pcState());
     } else {
         panic("Attempted to execute unimplemented instruction "
                 "'%s' (inst 0x%08x)", mnemonic, arm_inst->encoding());

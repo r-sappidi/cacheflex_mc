@@ -45,6 +45,12 @@
 #include "mem/ruby/network/garnet/NetworkLink.hh"
 #include "mem/ruby/network/garnet/Router.hh"
 #include "mem/ruby/system/RubySystem.hh"
+#include "mem/ruby/slicc_interface/AbstractController.hh"
+#if __has_include("mem/ruby/protocol/MESI_Three_Level_SPM/RequestMsg.hh")
+#define CACHEFLEX_MESSAGE_TYPES 1
+#include "mem/ruby/protocol/MESI_Three_Level_SPM/RequestMsg.hh"
+#include "mem/ruby/protocol/MESI_Three_Level_SPM/ResponseMsg.hh"
+#endif
 
 namespace gem5
 {
@@ -61,10 +67,80 @@ namespace garnet
  * (see configs/network/Network.py)
  */
 
+bool
+GarnetNetwork::requestVCAllowed(int vnet, int offset, int count, int dest) const
+{
+    if (!m_request_vc_partition || vnet != 0)
+        return true;
+    fatal_if(count < 2 || dest < 0, "Invalid request VC partition input");
+    const int base = getRubySystem()->MachineType_base_number(MachineType_Directory);
+    const bool directory = dest >= base &&
+        dest < base + getRubySystem()->MachineType_base_count(MachineType_Directory);
+    // Preserve the total VC/buffer count: lower half for private->LLC,
+    // upper half for LLC->directory. Requests holding LLC miss credits must
+    // not depend on VCs occupied by requests waiting for those same credits.
+    return directory ? offset >= count / 2 : offset < count / 2;
+}
+
+bool
+GarnetNetwork::sameRequestVCClass(int vnet, int a, int b, int count) const
+{
+    return !m_request_vc_partition || vnet != 0 ||
+        ((a % count < count / 2) == (b % count < count / 2));
+}
+
+int
+GarnetNetwork::directReductionKind(const Message *msg, NodeID source, int vnet)
+{
+#ifdef CACHEFLEX_MESSAGE_TYPES
+    using namespace MESI_Three_Level_SPM;
+    auto destination = msg->getDestination();
+    const auto dest = destination.getAllDest();
+    const auto privateBase = getRubySystem()->MachineType_base_number(MachineType_L1Cache);
+    const auto sharedBase = getRubySystem()->MachineType_base_number(MachineType_L2Cache);
+    int kind = 0;
+    NodeID expectedSource = -1, expectedDest = -1;
+    if (auto *r = dynamic_cast<const RequestMsg *>(msg)) {
+        if (r->getType() == CoherenceRequestType_L3_SPM && r->getL3Op() == 7) {
+            fatal_if(r->getRequestor().type != MachineType_L1Cache, "Direct source type");
+            kind = 1;
+            expectedSource = privateBase + r->getRequestor().num;
+            expectedDest = sharedBase + r->getRequestor().num;
+            fatal_if(r->getLen() != 128 && r->getLen() != 256, "Direct command size");
+        }
+    } else if (auto *r = dynamic_cast<const ResponseMsg *>(msg)) {
+        if (r->getType() == CoherenceResponseType_L3_SPM_REPLY && r->getL3Op() == 7) {
+            fatal_if(r->getSender().type != MachineType_L2Cache, "Direct sender type");
+            kind = 2;
+            expectedSource = sharedBase + r->getSender().num;
+            expectedDest = privateBase + r->getSender().num;
+        }
+    }
+    if (!kind || dest.size() != 1 || dest[0] != expectedDest)
+        return 0; // Remote-bank commands and replies retain the ordinary NoC.
+    fatal_if(source != getLocalNodeID(expectedSource), "Direct source NI mismatch");
+    fatal_if(get_router_id(expectedSource, vnet) != get_router_id(expectedDest, vnet),
+             "Direct reduction requires physically local core-bank placement");
+    return kind;
+#else
+    fatal("Direct reduction requires MESI_Three_Level_SPM");
+#endif
+}
+
 GarnetNetwork::GarnetNetwork(const Params &p)
     : Network(p)
 {
+    m_direct_reduction = p.cacheflex_direct_reduction;
+    m_direct_bytes = p.cacheflex_direct_bytes;
+    m_direct_latency = p.cacheflex_direct_latency;
+    fatal_if(m_direct_reduction &&
+             ((m_direct_bytes != 8 && m_direct_bytes != 16 && m_direct_bytes != 32) ||
+              m_direct_latency < 1), "Invalid finite direct reduction link");
     m_num_rows = p.num_rows;
+    m_message_profile = p.cacheflex_message_profile;
+    m_request_vc_partition = p.cacheflex_request_vc_partition;
+    fatal_if(m_request_vc_partition && p.vcs_per_vnet < 2,
+             "Request VC partition needs at least two existing VCs");
     m_ni_flit_size = p.ni_flit_size;
     m_max_vcs_per_vnet = 0;
     m_buffers_per_data_vc = p.buffers_per_data_vc;
@@ -372,6 +448,36 @@ GarnetNetwork::getNumRouters()
     return m_routers.size();
 }
 
+// Count successful injections once per destination, never VC retries.
+void
+GarnetNetwork::profileMessage(const Message *msg, const RouteInfo &route,
+                             int flits, int bytes, bool received,
+                             Tick network, Tick queue)
+{
+    if (!m_message_profile)
+        return;
+    int type = m_profile_types - 1;
+#ifdef CACHEFLEX_MESSAGE_TYPES
+    using namespace MESI_Three_Level_SPM;
+    if (auto *req = dynamic_cast<const RequestMsg*>(msg))
+        type = static_cast<int>(req->getType());
+    else if (auto *resp = dynamic_cast<const ResponseMsg*>(msg))
+        type = CoherenceRequestType_NUM + static_cast<int>(resp->getType());
+#endif
+    int dest = getLocalNodeID(route.dest_ni);
+    const int index = (((route.src_ni*m_nis.size()+dest)*m_virtual_networks+
+                        route.vnet)*m_profile_types+type);
+    if (received) {
+        ++m_message_received[index];
+        m_message_network_ticks[index] += network;
+        m_message_queue_ticks[index] += queue;
+    } else {
+        ++m_message_packets[index];
+        m_message_flits[index] += flits;
+        m_message_bytes[index] += bytes;
+    }
+}
+
 // Get ID of router connected to a NI.
 int
 GarnetNetwork::get_router_id(int global_ni, int vnet)
@@ -385,6 +491,76 @@ void
 GarnetNetwork::regStats()
 {
     Network::regStats();
+    directCommands.name(name()+".directCommands").desc("Dedicated local reduction commands launched");
+    directAcks.name(name()+".directAcks").desc("Dedicated completion packets launched");
+    directCommandBytes.name(name()+".directCommandBytes").desc("Payload plus 16-byte command headers");
+    directAckBytes.name(name()+".directAckBytes").desc("Conservative 16-byte completion records");
+    directBeats.name(name()+".directBeats").desc("Serialized dedicated-link beats, both directions");
+    directDelivered.name(name()+".directDelivered").desc("Packets delivered through finite protocol buffers");
+    directCreditWait.name(name()+".directCreditWait").desc("NI polls waiting for receiver credit return");
+    directReceiveBlocked.name(name()+".directReceiveBlocked").desc("Receive attempts blocked by buffer or shared ejection port");
+    directMaxPending.name(name()+".directMaxPending").desc("Maximum packet occupancy of any direct link; bounded by one");
+    if (m_message_profile) {
+        std::vector<std::string> types;
+#ifdef CACHEFLEX_MESSAGE_TYPES
+        using namespace MESI_Three_Level_SPM;
+        for (int i = 0; i < CoherenceRequestType_NUM; ++i)
+            types.push_back("req_" + CoherenceRequestType_to_string(
+                static_cast<CoherenceRequestType>(i)));
+        for (int i = 0; i < CoherenceResponseType_NUM; ++i)
+            types.push_back("resp_" + CoherenceResponseType_to_string(
+                static_cast<CoherenceResponseType>(i)));
+#else
+        fatal("CacheFlex message profile requires MESI_Three_Level_SPM");
+#endif
+        types.push_back("unknown");
+        m_profile_types = types.size();
+        const int nodes = m_nis.size();
+        std::vector<std::string> labels(nodes);
+        for (auto *link : params().ext_links) {
+            auto *ctrl = link->params().ext_node;
+            int global = getRubySystem()->MachineType_base_number(ctrl->getType()) +
+                         ctrl->getVersion();
+            labels.at(getLocalNodeID(global)) =
+                MachineType_to_string(ctrl->getType()) +
+                std::to_string(ctrl->getVersion());
+        }
+        const int size = nodes * nodes * m_virtual_networks * m_profile_types;
+        const std::vector<std::pair<statistics::Vector*, std::string>> stats = {
+            {&m_message_packets, "message_packets"},
+            {&m_message_flits, "message_flits"},
+            {&m_message_bytes, "message_bytes"},
+            {&m_message_received, "message_received"},
+            {&m_message_network_ticks, "message_network_ticks"},
+            {&m_message_queue_ticks, "message_queue_ticks"}};
+        for (auto &[stat, suffix] : stats) {
+            stat->init(size).name(name() + "." + suffix)
+                .flags(statistics::nozero | statistics::total);
+            for (int s = 0; s < nodes; ++s)
+                for (int d = 0; d < nodes; ++d)
+                    for (int v = 0; v < m_virtual_networks; ++v)
+                        for (int t = 0; t < m_profile_types; ++t) {
+                            int index = (((s*nodes+d)*m_virtual_networks+v)*
+                                         m_profile_types+t);
+                            stat->subname(index, labels[s] + "__" + labels[d] +
+                                "__v" + std::to_string(v) + "__" + types[t]);
+                        }
+        }
+    }
+
+    if (!m_message_profile) {
+        // Legacy statistics still require registration when collection is off.
+        const std::vector<std::pair<statistics::Vector*, std::string>> stats = {
+            {&m_message_packets, "message_packets"},
+            {&m_message_flits, "message_flits"},
+            {&m_message_bytes, "message_bytes"},
+            {&m_message_received, "message_received"},
+            {&m_message_network_ticks, "message_network_ticks"},
+            {&m_message_queue_ticks, "message_queue_ticks"}};
+        for (auto &[stat, suffix] : stats)
+            stat->init(1).name(name() + "." + suffix)
+                .flags(statistics::nozero);
+    }
 
     // Packets
     m_packets_received
@@ -528,6 +704,22 @@ GarnetNetwork::regStats()
             statistics::oneline)
         ;
 
+    m_link_flits
+        .init(m_networklinks.size())
+        .name(name() + ".link_flits")
+        .flags(statistics::pdf | statistics::total | statistics::nozero |
+               statistics::oneline);
+    m_link_utilization
+        .init(m_networklinks.size())
+        .name(name() + ".link_utilization")
+        .flags(statistics::pdf | statistics::nozero | statistics::oneline);
+    for (int link = 0; link < m_networklinks.size(); ++link) {
+        const std::string label = csprintf("link-%d:%s", link,
+                                           m_networklinks[link]->name());
+        m_link_flits.subname(link, label);
+        m_link_utilization.subname(link, label);
+    }
+
     // Traffic distribution
     for (int source = 0; source < m_routers.size(); ++source) {
         m_data_traffic_distribution.push_back(
@@ -559,6 +751,9 @@ GarnetNetwork::collateStats()
     for (int i = 0; i < m_networklinks.size(); i++) {
         link_type type = m_networklinks[i]->getType();
         int activity = m_networklinks[i]->getLinkUtilization();
+
+        m_link_flits[i] = activity;
+        m_link_utilization[i] = double(activity) / time_delta;
 
         if (type == EXT_IN_)
             m_total_ext_in_link_utilization += activity;
@@ -613,6 +808,28 @@ GarnetNetwork::update_traffic_distribution(RouteInfo route)
         (*m_data_traffic_distribution[src_node][dest_node])++;
     else
         (*m_ctrl_traffic_distribution[src_node][dest_node])++;
+}
+
+bool
+GarnetNetwork::functionalRead(Packet *pkt)
+{
+    for (auto *router : m_routers) {
+        if (router->functionalRead(pkt))
+            return true;
+    }
+    for (auto *ni : m_nis) {
+        if (ni->functionalRead(pkt))
+            return true;
+    }
+    for (auto *link : m_networklinks) {
+        if (link->functionalRead(pkt))
+            return true;
+    }
+    for (auto *bridge : m_networkbridges) {
+        if (bridge->functionalRead(pkt))
+            return true;
+    }
+    return false;
 }
 
 bool

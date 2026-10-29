@@ -67,6 +67,8 @@ def define_options(parser):
     )
     parser.add_argument("--l0i_size", type=str, default="4096B")
     parser.add_argument("--l0d_size", type=str, default="4096B")
+    parser.add_argument("--l1d-force-lru", action="store_true",
+                        help="Use LRU in private L2 with or without SPM")
     parser.add_argument("--l0i_assoc", type=int, default=1)
     parser.add_argument("--l0d_assoc", type=int, default=1)
     parser.add_argument(
@@ -188,7 +190,7 @@ def create_system(
             # Reserving SPM ways leaves the coherent ways as a non-power-of-2
             # subset; TreePLRU's tree indexing assumes the full associativity,
             # so use LRU (which scans the candidate list) when reserving.
-            if options.l1d_num_spm_ways > 0:
+            if options.l1d_num_spm_ways > 0 or options.l1d_force_lru:
                 l1_cache.replacement_policy = LRURP()
 
             l1_cntrl = MESI_Three_Level_L1Cache_Controller(

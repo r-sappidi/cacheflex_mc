@@ -43,6 +43,9 @@
 
 #include <iostream>
 #include <list>
+#include <deque>
+#include <array>
+#include <set>
 #include <unordered_map>
 
 #include "cpu/testers/rubytest/RubyTester.hh"
@@ -51,6 +54,7 @@
 #include "mem/ruby/protocol/RubyRequestType.hh"
 #include "mem/ruby/protocol/SequencerRequestType.hh"
 #include "mem/ruby/structures/CacheMemory.hh"
+#include "mem/ruby/structures/MicroResourcePool.hh"
 #include "mem/ruby/system/RubyPort.hh"
 #include "params/RubySequencer.hh"
 
@@ -66,6 +70,9 @@ struct SequencerRequest
     RubyRequestType m_type;
     RubyRequestType m_second_type;
     Cycles issue_time;
+    // Completion can synchronously retry a request before this record is
+    // popped from its list. Such a record no longer owns an admission credit.
+    bool admissionActive = true;
     SequencerRequest(PacketPtr _pkt, RubyRequestType _m_type,
                      RubyRequestType _m_second_type, Cycles _issue_time)
                 : pkt(_pkt), m_type(_m_type), m_second_type(_m_second_type),
@@ -146,7 +153,9 @@ class Sequencer : public RubyPort
 
     RequestStatus makeRequest(PacketPtr pkt) override;
     virtual bool empty() const;
-    int outstandingCount() const override { return m_outstanding_count; }
+    int outstandingCount() const override {
+        return m_outstanding_count + reductionSource.size() + reductionSink.size() + l3ReductionFlight.size();
+    }
 
     bool isDeadlockEventScheduled() const override
     { return deadlockCheckEvent.scheduled(); }
@@ -156,7 +165,7 @@ class Sequencer : public RubyPort
 
     virtual void print(std::ostream& out) const;
 
-    void markRemoved();
+    void markRemoved(SequencerRequest &request);
     void evictionCallback(Addr address);
     int coreId() const { return m_coreId; }
 
@@ -257,6 +266,69 @@ class Sequencer : public RubyPort
 
   private:
     int m_max_outstanding_requests;
+    struct ReductionCommand {
+        Addr slot;
+        uint32_t scale;
+        ContextID context;
+        PacketPtr response = nullptr;
+        Tick accepted;
+        uint64_t serial = 0;
+        bool halfContribution = false;
+        bool initialize = false;
+        std::array<uint8_t, 256> contribution;
+    };
+    bool reductionEnabled, reductionAsync, l3ReductionEnabled;
+    CacheMemory *reductionCache;
+    unsigned reductionSourceCap, reductionSinkCap, reductionLinkBytes,
+             reductionLanes;
+    Cycles reductionLinkLatency, reductionMulLatency, reductionAddLatency;
+    std::deque<ReductionCommand> reductionSource, reductionSink;
+    struct L3ReductionFlight { ReductionCommand command; bool issued = false; };
+    std::map<PacketPtr, L3ReductionFlight> l3ReductionFlight;
+    uint64_t l3ReductionSerial = 0;
+    void serviceL3Reduction();
+    void completeL3Reduction(PacketPtr pkt);
+    std::map<Addr, unsigned> reductionPending;
+    PacketPtr reductionMemoryPacket = nullptr;
+    bool reductionMemoryIssued = false;
+    bool reductionWriting = false;
+    bool reductionLinkActive = false;
+    Tick reductionLinkDone = 0, reductionArithmeticDone = 0;
+    EventFunctionWrapper reductionEvent;
+    void scheduleReduction();
+    void serviceReduction();
+    bool reductionConflicts(PacketPtr pkt) const;
+    bool reductionOlderAccess(Addr slot) const;
+    RequestStatus acceptReduction(PacketPtr pkt);
+    void reductionMemoryDone(PacketPtr pkt);
+    statistics::Scalar reductionAccepted, reductionCompleted,
+        reductionSourceFull, reductionOrderingRetries, reductionTransportBytes,
+        reductionMaxSource, reductionMaxSink, reductionLifetimeCycles,
+        reductionMemoryRetries, reductionSinkFullCycles;
+    std::set<Addr> m_earlyReadPcs;
+    std::map<PacketPtr, std::vector<uint8_t>> m_earlyReadSnapshots;
+    bool tryEarlyRead(PacketPtr pkt);
+    CacheMemory *m_idealStagingCache;
+    AbstractController *m_idealStagingController;
+    std::set<Addr> m_idealStagingSources, m_idealStagingSlots;
+    bool tryIdealStaging(PacketPtr pkt);
+    void finishIdealStaging(PacketPtr pkt, Addr slot);
+    int m_cacheflex_fetch_credits;
+    int m_cacheflex_bridge_credits;
+    int m_cacheflex_max_bridge_requests;
+    MessageBuffer *m_micro_spm_ingress;
+    MicroResourcePool *m_micro_data_misses, *m_micro_inst_misses;
+    MicroResourcePool *m_micro_writebacks;
+    unsigned m_micro_targets;
+    MessageBuffer *ingressQueue(PacketPtr pkt) const;
+    bool m_finite_ingress;
+    unsigned m_max_line_targets;
+    bool m_ingress_retry = false;
+    // Replay references for requests already owning CPU/LSQ tracking. No new
+    // request is accepted here; entries are removed when ingress accepts them.
+    std::list<std::pair<PacketPtr, RubyRequestType>> m_ingress_replays;
+    void serviceIngress();
+    void scheduleIngress();
 
     int m_num_pending_invs;
 
@@ -282,14 +354,34 @@ class Sequencer : public RubyPort
     Cycles m_spmcpLastAccountCycle = Cycles(0);
     statistics::Scalar m_spmcpRequestsIssued;
     statistics::Scalar m_spmcpRequestsCompleted;
+    statistics::Scalar m_spmcpClaimRequestsIssued;
+    statistics::Scalar m_spmcpClaimRequestsCompleted;
+    statistics::Scalar m_spmcpClaimAliasedRequests;
+    statistics::Scalar m_spmcpDataRequestsIssued;
+    statistics::Scalar m_spmcpDataRequestsCompleted;
+    statistics::Scalar m_spmcpDataAliasedRequests;
     statistics::Scalar m_spmcpBusyCycles;
     statistics::Scalar m_spmcpOutstandingCycleArea;
     statistics::Scalar m_spmcpMaxOutstanding;
     statistics::Formula m_spmcpAverageParallelism;
     statistics::Scalar m_spmcpRequestAttempts;
     statistics::Scalar m_spmcpBufferFullRejects;
+    statistics::Scalar m_ingressFullRejects;
+    statistics::Scalar m_ingressDeferredReplays;
+    statistics::Scalar m_lineTargetFullRejects;
+    statistics::Scalar m_globalAdmissionFullRejects;
     statistics::Scalar m_spmcpBlockedLineRejects;
     statistics::Scalar m_spmcpAliasedRequests;
+    statistics::Scalar m_idealStagingCopies;
+    statistics::Scalar m_earlyReadEligible;
+    statistics::Scalar m_earlyReadIssued;
+    statistics::Scalar m_earlyReadVerified;
+    statistics::Scalar m_earlyReadFallbackAlias;
+    statistics::Scalar m_earlyReadFallbackFunctional;
+    statistics::Scalar m_idealStagingFallbackSlot;
+    statistics::Scalar m_idealStagingFallbackAlias;
+    statistics::Scalar m_idealStagingFallbackRead;
+    statistics::Scalar m_idealStagingOrderingRetries;
 
     int m_coreId;
 
@@ -333,6 +425,7 @@ class Sequencer : public RubyPort
     std::vector<statistics::Counter> m_IncompleteTimes;
 
     EventFunctionWrapper deadlockCheckEvent;
+    EventFunctionWrapper ingressEvent;
 
     // support for LL/SC
 

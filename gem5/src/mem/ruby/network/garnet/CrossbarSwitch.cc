@@ -32,6 +32,7 @@
 #include "mem/ruby/network/garnet/CrossbarSwitch.hh"
 
 #include "debug/RubyNetwork.hh"
+#include "mem/ruby/network/CacheFlexTiming.hh"
 #include "mem/ruby/network/garnet/OutputUnit.hh"
 #include "mem/ruby/network/garnet/Router.hh"
 
@@ -76,6 +77,7 @@ CrossbarSwitch::wakeup()
 
         flit *t_flit = switch_buffer.peekTopFlit();
         if (t_flit->is_stage(ST_, curTick())) {
+            CFT_FLIT("XBAR", t_flit, "router=%d", m_router->get_id());
             int outport = t_flit->get_outport();
 
             // flit performs LT_ in the next cycle
@@ -89,6 +91,16 @@ CrossbarSwitch::wakeup()
             m_crossbar_activity++;
         }
     }
+}
+
+bool
+CrossbarSwitch::functionalRead(Packet *pkt)
+{
+    for (auto& switch_buffer : switchBuffers) {
+        if (switch_buffer.functionalRead(pkt))
+            return true;
+    }
+    return false;
 }
 
 bool

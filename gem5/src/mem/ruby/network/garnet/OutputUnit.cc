@@ -35,6 +35,7 @@
 #include "mem/ruby/network/garnet/Credit.hh"
 #include "mem/ruby/network/garnet/CreditLink.hh"
 #include "mem/ruby/network/garnet/Router.hh"
+#include "mem/ruby/network/garnet/GarnetNetwork.hh"
 #include "mem/ruby/network/garnet/flitBuffer.hh"
 
 namespace gem5
@@ -95,10 +96,13 @@ OutputUnit::has_credit(int out_vc)
 
 // Check if the output port (i.e., input port at next router) has free VCs.
 bool
-OutputUnit::has_free_vc(int vnet)
+OutputUnit::has_free_vc(int vnet, int dest)
 {
     int vc_base = vnet*m_vc_per_vnet;
     for (int vc = vc_base; vc < vc_base + m_vc_per_vnet; vc++) {
+        if (!m_router->get_net_ptr()->requestVCAllowed(
+                vnet, vc - vc_base, m_vc_per_vnet, dest))
+            continue;
         if (is_vc_idle(vc, curTick()))
             return true;
     }
@@ -108,10 +112,13 @@ OutputUnit::has_free_vc(int vnet)
 
 // Assign a free output VC to the winner of Switch Allocation
 int
-OutputUnit::select_free_vc(int vnet)
+OutputUnit::select_free_vc(int vnet, int dest)
 {
     int vc_base = vnet*m_vc_per_vnet;
     for (int vc = vc_base; vc < vc_base + m_vc_per_vnet; vc++) {
+        if (!m_router->get_net_ptr()->requestVCAllowed(
+                vnet, vc - vc_base, m_vc_per_vnet, dest))
+            continue;
         if (is_vc_idle(vc, curTick())) {
             outVcState[vc].setState(ACTIVE_, curTick());
             return vc;
@@ -170,6 +177,12 @@ OutputUnit::insert_flit(flit *t_flit)
 {
     outBuffer.insert(t_flit);
     m_out_link->scheduleEventAbsolute(m_router->clockEdge(Cycles(1)));
+}
+
+bool
+OutputUnit::functionalRead(Packet *pkt)
+{
+    return outBuffer.functionalRead(pkt);
 }
 
 bool

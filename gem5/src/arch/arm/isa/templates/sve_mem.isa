@@ -135,6 +135,46 @@ def template SveContigMemSIOpDeclare {{
     };
 }};
 
+// Dedicated declaration: the generic SI template is also used by some
+// register-offset instructions and must not assume an immediate member.
+def template SpmStoreSIOpDeclare {{
+    %(tpl_header)s
+    class %(class_name)s : public %(base_class)s
+    {
+      private:
+        %(reg_idx_arr_decl)s;
+      protected:
+        typedef RegElemType TPElem;
+      public:
+        %(class_name)s(const char* mnem, ExtMachInst machInst,
+                RegIndex _dest, RegIndex _gp, RegIndex _base,
+                uint64_t _imm) :
+            %(base_class)s(mnem, machInst, %(op_class)s,
+                    _dest, _gp, _base, _imm)
+        {
+            %(set_reg_idx_arr)s;
+            %(constructor)s;
+        }
+        bool spmStoreAddress(RegVal baseValue, ThreadContext *tc,
+                             Addr &addr, unsigned &bytes) const override
+        {
+            const unsigned count =
+                ArmStaticInst::getCurSveVecLen<RegElemType>(tc);
+            bytes = count * sizeof(MemElemType);
+            addr = baseValue + ((int64_t)this->imm * bytes);
+            return true;
+        }
+        Fault execute(ExecContext *, trace::InstRecord *) const override;
+        Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
+        Fault completeAcc(PacketPtr, ExecContext *,
+                          trace::InstRecord *) const override;
+        void annotateFault(ArmISA::ArmFault *fault) override
+        {
+            %(fa_code)s
+        }
+    };
+}};
+
 def template SveContigMemExecDeclare {{
     template
     Fault %(class_name)s%(tpl_args)s::execute(ExecContext *,

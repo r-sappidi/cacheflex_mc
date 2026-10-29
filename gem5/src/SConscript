@@ -424,6 +424,23 @@ class Executable(TopLevelBase):
             env.Append(LIBS=list(lib.source for lib in libs))
 
         executable = env.Program(self.path(env).abspath, objs)[0]
+        if os.environ.get('CACHEFLEX_FORCE_LINK') and self.target == 'gem5':
+            env.AlwaysBuild(executable)
+        if os.environ.get('CACHEFLEX_LINK_MANIFEST') and self.target == 'gem5':
+            # Diagnostic build artifact: capture the exact configured link
+            # invocation for hosts where SCons fails to execute the root task.
+            import json
+            with open(os.environ['CACHEFLEX_LINK_MANIFEST'], 'w') as stream:
+                json.dump(dict(argv=[str(a) for a in env.subst_list('$LINKCOM', target=[executable],
+                              source=executable.sources)[0]],
+                              environment={k:str(v) for k,v in env['ENV'].items()}), stream)
+        if (os.environ.get('CACHEFLEX_UNIT_LINK_MANIFEST') and
+                self.target == 'tree_plru_rp.test'):
+            import json
+            with open(os.environ['CACHEFLEX_UNIT_LINK_MANIFEST'], 'w') as stream:
+                json.dump(dict(argv=[str(a) for a in env.subst_list('$LINKCOM',
+                    target=[executable], source=executable.sources)[0]],
+                    environment={k:str(v) for k,v in env['ENV'].items()}), stream)
 
         if sys.platform == 'sunos5':
             cmd = 'cp $SOURCE $TARGET; strip $TARGET'
@@ -678,7 +695,10 @@ envs = {
 }
 
 envs['debug'].Append(CPPDEFINES=['GEM5_DEBUG', 'TRACING_ON=1'])
-envs['opt'].Append(CCFLAGS=['-g'], CPPDEFINES=['TRACING_ON=1'])
+# This host pairs a module-provided GCC with a system assembler too old to
+# accept GCC's --gdwarf-N options.  Native debug symbols are not required for
+# simulation or gem5 statistics, so keep tracing enabled without -g.
+envs['opt'].Append(CPPDEFINES=['TRACING_ON=1'])
 envs['fast'].Append(CPPDEFINES=['NDEBUG', 'TRACING_ON=0'])
 
 # For Link Time Optimization, the optimisation flags used to compile

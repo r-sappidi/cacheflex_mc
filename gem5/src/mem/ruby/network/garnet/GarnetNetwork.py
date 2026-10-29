@@ -42,6 +42,11 @@ class GarnetNetwork(RubyNetwork):
     cxx_class = "gem5::ruby::garnet::GarnetNetwork"
 
     num_rows = Param.Int(0, "number of rows if 2D (mesh/torus/..) topology")
+    cacheflex_message_profile = Param.Bool(False, "MESI SPM message type/source/destination/vnet counters")
+    cacheflex_request_vc_partition = Param.Bool(False, "Partition existing request VCs by LLC versus directory destination for finite-resource progress")
+    cacheflex_direct_reduction = Param.Bool(False, "One-credit local private-controller to LLC reduction links")
+    cacheflex_direct_bytes = Param.UInt32(16, "Dedicated bytes per Ruby cycle per direction")
+    cacheflex_direct_latency = Param.UInt32(2, "One-way registered-wire propagation cycles, excluding endpoints and serialization")
     ni_flit_size = Param.UInt32(16, "network interface flit size in bytes")
     vcs_per_vnet = Param.UInt32(4, "virtual channels per virtual network")
     buffers_per_data_vc = Param.UInt32(4, "buffers per data virtual channel")

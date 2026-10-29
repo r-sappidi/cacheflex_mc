@@ -44,7 +44,6 @@
 
 #include <cassert>
 #include <cstdint>
-#include <deque>
 #include <list>
 #include <map>
 #include <queue>
@@ -53,7 +52,6 @@
 #include "arch/generic/mmu.hh"
 #include "arch/generic/tlb.hh"
 #include "base/flags.hh"
-#include "base/statistics.hh"
 #include "base/types.hh"
 #include "cpu/inst_seq.hh"
 #include "cpu/o3/dyn_inst_ptr.hh"
@@ -92,33 +90,8 @@ class LSQ
 
       public:
         /** Default constructor. */
-        DcachePort(LSQ *_lsq, CPU *_cpu);
-
-        struct DcachePortStats : public statistics::Group
-        {
-            DcachePortStats(CPU* cpu);
-
-            /* Number of recieved responses */
-            statistics::Scalar numRecvResp;
-
-            /* Number of recieved response bytes */
-            statistics::Scalar numRecvRespBytes;
-
-            /* Average bandwidth of received responses */
-            statistics::Formula recvRespAvgBW;
-
-            /* Average pkt size per received response */
-            statistics::Formula recvRespAvgSize;
-
-            /* Average rate of received responses per cycle */
-            statistics::Formula recvRespAvgRate;
-
-            /* Average retry rate per received response */
-            statistics::Formula recvRespAvgRetryRate;
-
-            /* Number of retry responses sent */
-            statistics::Scalar numSendRetryResp;
-        } dcachePortStats;
+        DcachePort(LSQ *_lsq, CPU *_cpu,
+                   const std::string &suffix = ".dcache_port");
 
       protected:
 
@@ -144,26 +117,41 @@ class LSQ
          * @return true since we have to snoop
          */
         virtual bool isSnooping() const { return true; }
-
-        /** Applies throttling in recvTimingResp for incoming load responses */
-        bool throttleReadResp(PacketPtr pkt);
     };
 
-    class SpmPort : public RequestPort
-    {
-      protected:
-        LSQ *lsq;
-        CPU *cpu;
-
-        bool recvTimingResp(PacketPtr pkt) override;
-        void recvReqRetry() override;
-
-        void recvFunctionalSnoop(PacketPtr pkt) override {}
-        void recvTimingSnoopReq(PacketPtr pkt) override {}
-        bool isSnooping() const override { return false; }
-
+    // weihang
+    class BridgePort : public DcachePort {
       public:
-        SpmPort(LSQ *_lsq, CPU *_cpu);
+        BridgePort(LSQ *lsq, CPU *cpu)
+            : DcachePort(lsq, cpu, ".bridge_port") {}
+      protected:
+        void recvReqRetry() override;
+        bool isSnooping() const override { return false; }
+    };
+
+    class SpmPort : public RequestPort {
+        protected:
+            LSQ *lsq;
+            CPU *cpu;
+        public:
+            SpmPort(LSQ *_lsq, CPU *_cpu,
+                    const std::string &suffix = ".spm_port");
+        protected:
+            bool recvTimingResp(PacketPtr pkt) override;
+            void recvReqRetry() override;
+            void recvTimingSnoopReq(PacketPtr pkt) override;
+            bool isSnooping() const override { return false; }
+            bool isSPMPort() const override { return true; }
+            void recvFunctionalSnoop(PacketPtr pkt) override;
+    };
+
+
+    class ReductionPort : public SpmPort {
+      public:
+        ReductionPort(LSQ *lsq, CPU *cpu)
+            : SpmPort(lsq, cpu, ".reduction_port") {}
+      protected:
+        void recvReqRetry() override;
     };
 
     /** Memory operation metadata.
@@ -479,6 +467,7 @@ class LSQ
          * Test if the request accesses a particular cache line.
          */
         virtual bool isCacheBlockHit(Addr blockAddr, Addr cacheBlockMask) = 0;
+        virtual bool keepAliveAfterRelease() const { return false; }
 
         /** Update the status to reflect that a packet was sent. */
         void
@@ -573,7 +562,8 @@ class LSQ
         {
             assert(_numOutstandingPackets > 0);
             _numOutstandingPackets--;
-            if (_numOutstandingPackets == 0 && isReleased())
+            if (_numOutstandingPackets == 0 && isReleased() &&
+                !keepAliveAfterRelease())
                 delete this;
         }
 
@@ -708,6 +698,58 @@ class LSQ
         virtual std::string name() const { return "SplitDataRequest"; }
     };
 
+    /**
+     * One architected SPMCPB3 command with three independently translated and
+     * coherent source-line requests.  Completion is aggregated by the normal
+     * split-request machinery, so the CPU observes one SPMCP response.
+     */
+    class BatchSPMCPRequest : public SplitDataRequest
+    {
+      public:
+        BatchSPMCPRequest(LSQUnit* port, const DynInstPtr& inst,
+                const Addr& addr, const Request::Flags& flags_,
+                PacketDataPtr data=nullptr, uint64_t* res=nullptr) :
+            SplitDataRequest(port, inst, false, addr, 3 * 64, flags_,
+                             data, res)
+        {}
+
+        void configureDestinations(Addr encoded_dst);
+        void buildPackets() override;
+        bool noteSPMResponse()
+        {
+            ++numReceivedPackets;
+            assert(numReceivedPackets <= 3);
+            return numReceivedPackets == 3;
+        }
+        std::string name() const override { return "BatchSPMCPRequest"; }
+    };
+
+    /** One architected command feeding a decoupled, one-line/cycle 2-D DMA. */
+    class DmaSPMCPRequest : public SingleDataRequest
+    {
+      private:
+        uint32_t nextToIssue = 0;
+        uint32_t responses = 0;
+        bool configured = false;
+        bool background = false;
+
+      public:
+        DmaSPMCPRequest(LSQUnit* port, const DynInstPtr& inst,
+                const Addr& addr, const Request::Flags& flags_,
+                PacketDataPtr data=nullptr, uint64_t* res=nullptr) :
+            SingleDataRequest(port, inst, false, addr, 8, flags_, data, res)
+        {}
+        void configure(Addr descriptor);
+        void buildPackets() override;
+        void sendPacketToCache() override;
+        bool noteSPMResponse() { return ++responses == _packets.size(); }
+        bool allIssued() const { return configured && nextToIssue == _packets.size(); }
+        void startBackground() { background = true; }
+        bool isBackground() const { return background; }
+        bool keepAliveAfterRelease() const override { return !allIssued(); }
+        std::string name() const override { return "DmaSPMCPRequest"; }
+    };
+
     /** Constructs an LSQ with the given parameters. */
     LSQ(CPU *cpu_ptr, IEW *iew_ptr, const BaseO3CPUParams &params);
 
@@ -729,6 +771,7 @@ class LSQ
 
     /** Ticks the LSQ. */
     void tick();
+    void registerDma(DmaSPMCPRequest *request);
 
     /** Inserts a load into the LSQ. */
     void insertLoad(const DynInstPtr &load_inst);
@@ -835,6 +878,16 @@ class LSQ
      */
     bool isFull(ThreadID tid);
 
+
+
+    //jq86
+    bool spmLqFull();
+    bool spmSqFull();
+    bool spmLqFull(ThreadID tid);
+    bool spmSqFull(ThreadID tid);
+    bool isSpmFull();
+    bool isSpmFull(ThreadID tid);
+
     /** Returns if the LSQ is empty (both LQ and SQ are empty). */
     bool isEmpty() const;
     /** Returns if all of the LQs are empty. */
@@ -851,9 +904,6 @@ class LSQ
     bool sqFull();
     /** Returns if the SQ of a given thread is full. */
     bool sqFull(ThreadID tid);
-
-    bool spmLqFull(ThreadID tid);
-    bool spmSqFull(ThreadID tid);
 
     /**
      * Returns if the LSQ is stalled due to a memory operation that must be
@@ -935,23 +985,42 @@ class LSQ
     bool cacheBlocked() const;
     /** Set D-cache blocked status */
     void cacheBlocked(bool v);
-    /** Is any store port available to use? */
+    /** Is any cache port available to use? (main LSQ) */
     bool cachePortAvailable(bool is_load) const;
-    /** Another store port is in use */
+    /** Mark a cache port as used. */
     void cachePortBusy(bool is_load);
-    bool spmPortAvailable(bool is_load) const;
-    void spmPortBusy(bool is_load);
-    bool hasOlderSpmBridge(ThreadID tid, InstSeqNum seq_num) const;
-    void retireSpmBridge(ThreadID tid, InstSeqNum seq_num);
+
+    /** Are SPM ports available? Returns available port slots this cycle. */
+    int spmPortsAvailable(bool is_load) const;
+    /** Mark SPM port(s) as used. count = num cachelines consumed. */
+    void spmPortBusy(bool is_load, int count = 1);
 
     RequestPort &getDataPort() { return dcachePort; }
-    RequestPort &getSpmPort() { return spmPort; }
 
-    void sendRetryResp();
+    // weihang
+    RequestPort &getSpmPort() { return spmPort; }
+    RequestPort &getBridgePort() { return bridgePort; }
+    RequestPort &getReductionPort() { return reductionPort; }
+    bool independentReduction() const { return independentReductionRetries; }
+    bool reductionBlocked() const { return _reductionBlocked; }
+    void reductionBlocked(bool value) { _reductionBlocked = value; }
+    void recvReductionRetry();
+    bool independentBridge() const { return independentBridgeRetries; }
+    bool bridgeBlocked() const { return _bridgeBlocked; }
+    void bridgeBlocked(bool value) { _bridgeBlocked = value; }
+    bool spmBlocked() const { return _spmBlocked; }
+    void spmBlocked(bool value) { _spmBlocked = value; }
+    void recvBridgeRetry();
+    void recvSpmRetry();
 
   protected:
     /** D-cache is blocked */
     bool _cacheBlocked;
+    const bool independentBridgeRetries;
+    const bool independentReductionRetries;
+    bool _reductionBlocked = false;
+    bool _bridgeBlocked = false;
+    bool _spmBlocked = false;
     /** The number of cache ports available each cycle (stores only). */
     int cacheStorePorts;
     /** The number of used cache ports in this cycle by stores. */
@@ -960,10 +1029,13 @@ class LSQ
     int cacheLoadPorts;
     /** The number of used cache ports in this cycle by loads. */
     int usedLoadPorts;
-    int spmStorePorts;
-    int usedSpmStorePorts;
+
+    /** SPM port counters — independent from cache ports. */
     int spmLoadPorts;
     int usedSpmLoadPorts;
+    int spmStorePorts;
+    int usedSpmStorePorts;
+    std::vector<DmaSPMCPRequest *> activeDmas;
 
     /** If the LSQ is currently waiting for stale translations */
     bool waitingForStaleTranslation;
@@ -1013,28 +1085,28 @@ class LSQ
     /** Data port. */
     DcachePort dcachePort;
 
-    SpmPort spmPort;
+    //weihang
+    // DcachePort SpmPort; 
+    SpmPort spmPort; 
+    BridgePort bridgePort;
+    ReductionPort reductionPort;
+    // weihang
+ 
+
+    // MasterPort& getMasterPort(const std::string& if_name, PortID idx=InvalidPortID) override;
 
     /** The LSQ units for individual threads. */
     std::vector<LSQUnit> thread;
 
+    //weihang
     std::vector<LSQUnit> spmThread;
 
-    std::vector<std::deque<InstSeqNum>> spmBridgeInsts;
+  public:
+    // jq86: accessor for spmThread LSQUnit (for WAR check in main thread writebackStores)
+    LSQUnit& getSpmUnit(ThreadID tid);
 
     /** Number of Threads. */
     ThreadID numThreads;
-
-    /** Enable load receive response throttling in the LSQ. */
-    const bool recvRespThrottling;
-    const unsigned recvRespMaxCachelines;
-    const unsigned recvRespBufferSize;
-    unsigned recvRespBytes;
-    unsigned recvRespPendBytes;
-    unsigned recvRespCachelines;
-    Addr recvRespLastCachelineAddr;
-    Cycles recvRespLastActiveCycle;
-    EventFunctionWrapper retryRespEvent;
 };
 
 } // namespace o3

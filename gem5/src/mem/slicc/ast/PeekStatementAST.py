@@ -86,6 +86,8 @@ class PeekStatementAST(StatementAST):
 """
         )
 
+        code('recordFlightMessage("PEEK", "${{self.queue_name.var.ident}}", *in_msg_ptr);')
+
         if "block_on" in self.pairs:
             address_field = self.pairs["block_on"]
             code(

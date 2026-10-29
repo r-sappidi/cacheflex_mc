@@ -40,6 +40,9 @@
 
 machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
  : CacheMemory * cache;
+   MicroResourcePool * missCredits;
+   MicroResourcePool * writeCredits;
+   MicroResourcePool * l0WriteCredits;
    int l2_select_num_bits;
    Cycles l1_request_latency := 2;
    Cycles l1_response_latency := 2;
@@ -50,6 +53,9 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
    Cycles spm_access_response_latency := 1;
    Cycles spm_response_latency := 6;
    Cycles to_l2_latency := 1;
+   bool spm_silent_retry := "False";
+   bool l3_spm_enabled := "False";
+   Cycles spm_silent_retry_latency := 8;
 
    // Message Buffers between the L1 and the L0 Cache
    // From the L1 cache to the L0 cache
@@ -63,6 +69,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
    // Dedicated pure-SPM request path from the private L0 controller.
    MessageBuffer * spmBufferFromL0, network="From";
+   MessageBuffer * returnBufferFromL0, network="From";
 
    // Message queue from this L1 cache TO the network / L2
    MessageBuffer * requestToL2, network="To", virtual_network="0",
@@ -119,8 +126,15 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     EX_L0, AccessPermission:Busy, desc="SPMCP_fetch source exclusive; recalling L0";
     SX_A, AccessPermission:Busy, desc="SPMCP_fetch source shared; sent PUTS";
     MX_A, AccessPermission:Busy, desc="SPMCP_fetch source modified; sent PUTM";
+    IX_A, AccessPermission:Busy, desc="SPM snapshot buffered; coherent ownership relinquished; waiting for Put_Ack";
     EX_A, AccessPermission:Busy, desc="SPMCP_fetch source exclusive; sent PUTE";
     XWB, AccessPermission:Busy, desc="SPM writeback request outstanding";
+    XM, AccessPermission:Busy, desc="Waiting for multicast SPM install acknowledgements";
+    XC, AccessPermission:Busy, desc="Waiting for multicast SPM way-claim acknowledgements";
+    XP, AccessPermission:Busy, desc="Receiver SPM slot awaiting multicast data";
+    L3_SEND, AccessPermission:Busy, desc="Released coherent source snapshot in existing TBE, awaiting shared install issue";
+    L3_WB_READ, AccessPermission:Busy, desc="Existing TBE reserved for shared writeback snapshot";
+    L3_WB_SEND, AccessPermission:Busy, desc="Shared snapshot buffered until coherent writeback can issue";
   }
 
   // EVENTS
@@ -134,6 +148,9 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     // L0 cache received the invalidation message
     // and has sent the data.
     L0_DataAck,      desc="L0 received INV message";
+    L0_DataAckEscape, desc="Recall data on finite independent return lane";
+    L0_AckEscape, desc="Recall acknowledgement on finite return lane";
+    WriteBackEscape, desc="L0 eviction ordered with recall responses";
 
     Inv,           desc="Invalidate request from L2 bank";
 
@@ -146,6 +163,9 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     Fwd_GETX,   desc="GETX from other processor";
     Fwd_GETS,   desc="GETS from other processor";
     Fwd_GETS_Silent, desc="Silent SPM-copy GETS from another core; supply a data snapshot without changing this owner's coherence state";
+    Fwd_GETS_SilentRetry, desc="Stale silent owner returns NACK instead of request-channel bounce";
+    SPM_SilentRetry, desc="Consume NACK into existing fetch TBE, without blocking response network";
+    SPM_SilentReissue, desc="Reissue a NACKed fetch using its existing miss credit and TBE";
 
     Data,       desc="Data for processor";
     Data_Exclusive,       desc="Data for processor";
@@ -177,6 +197,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     SPMST_direct,       desc="Direct SPM store request";
     SPMWB_read_direct,  desc="Direct SPM writeback source read request";
 
+    SPMCP_snapshot, desc="Install retained L0 snapshot without coherent ownership change";
     SPMCP_fetch, desc="Copy coherent source line into private-L1 SPM";
     SPMCP_install, desc="Claim private-L1 SPM slot";
     SPMLD, desc="Read private-L1 SPM slot";
@@ -186,6 +207,25 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     SPM_release, desc="Release private-L1 SPM slot";
     Put_Ack, desc="SPM source release ack";
     SPMWB_Ack, desc="SPM writeback ack";
+    SPM_McastSourceData, desc="Source data ready for multicast distribution";
+    SPM_McastPutAck, desc="Resident source released and ready for multicast";
+    SPM_McastData, desc="Unsolicited multicast SPM installation data";
+    SPM_McastPending, desc="Multicast destination announced before data";
+    SPM_McastAck, desc="Remote multicast install acknowledgement";
+    SPM_McastLastAck, desc="Last remote multicast install acknowledgement";
+    SPM_McastClaimLocal, desc="Initiate a multicast SPM way claim";
+    SPM_McastClaim, desc="Remote multicast SPM way claim";
+    SPM_McastClaimAck, desc="Remote multicast way-claim acknowledgement";
+    SPM_McastClaimLastAck, desc="Last remote multicast way-claim acknowledgement";
+    SPM_McastClaimWait, desc="Remote way claim waiting for coherent victim eviction";
+    L3Forward, desc="Forward ordinary-ingress shared SPM request";
+    L3ForwardWB, desc="Reserve finite snapshot tracking before shared writeback";
+    L3ForwardDirect, desc="Forward direct-ingress shared SPM request";
+    L3Reply, desc="Shared SPM result to local sequencer";
+    L3WritebackData, desc="Shared SPM payload to coherent writeback home";
+    L3SourceData, desc="Fresh source response for remote installation";
+    L3SourceAck, desc="Coherent source released for remote installation";
+    L3Send, desc="Issue buffered remote install without holding a response FIFO";
   }
 
   // TYPES
@@ -200,10 +240,12 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     int SPMSet, default="0", desc="Decoded SPM set index";
     int SPMWay, default="0", desc="Decoded SPM way id";
     int Len, default="0", desc="SPM operation length";
+    int MulticastMask, default="0", desc="Destination private-L1 core mask";
   }
 
   // TBE fields
   structure(TBE, desc="...") {
+    RubyAccessMode SilentAccessMode, desc="Preserved access mode for silent fetch retry";
     Addr addr,              desc="Physical address for this TBE";
     State TBEState,        desc="Transient state";
     DataBlock DataBlk,                desc="Buffer for the data block";
@@ -214,6 +256,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     int SPMSet, default="0", desc="Decoded SPM set index";
     int SPMWay, default="0", desc="Decoded SPM way id";
     int Len, default="0", desc="SPM operation length";
+    int MulticastMask, default="0", desc="Destination private-L1 core mask";
   }
 
   structure(TBETable, external="yes") {
@@ -224,11 +267,16 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   TBETable TBEs, template="<L1Cache_TBE>", constructor="m_number_of_TBEs";
+  // At most one retry marker per live IX_D TBE; not an extra request/data queue.
+  // TimerTable supplies simulator scheduling for a pending bit in that TBE.
+  TimerTable spmSilentRetryTimer;
+  TimerTable l3SendTimer;
   DataBlock spmZeroData;
 
   int l2_select_low_bit, default="m_ruby_system->getBlockSizeBits()";
 
   Tick clockEdge();
+  Tick cyclesToTicks(Cycles c);
   Cycles ticksToCycles(Tick t);
   void set_cache_entry(AbstractCacheEntry a);
   void unset_cache_entry();
@@ -239,6 +287,25 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   void profileMsgDelay(int virtualNetworkType, Cycles c);
 
   // inclusive cache returns L1 entries only
+  bool isL3SPM(Addr addr) {
+    return bitSelect(addr, 27, 27) == intToAddress(1);
+  }
+
+  MessageSizeType l3DataSize(int len) {
+    if (len > 128) { return MessageSizeType:SPM_Data256; }
+    if (len > 64) { return MessageSizeType:SPM_Data128; }
+    return MessageSizeType:Data;
+  }
+
+  int l3Operation(CoherenceClass kind) {
+    if (kind == CoherenceClass:SPM_LD || kind == CoherenceClass:SPMWB_READ) { return 1; }
+    if (kind == CoherenceClass:SPM_ST) { return 2; }
+    if (kind == CoherenceClass:SPM_RELEASE) { return 3; }
+    if (kind == CoherenceClass:SPMWB_STORE) { return 5; }
+    if (kind == CoherenceClass:SPMCP_INSTALL) { return 6; }
+    error("Unsupported shared SPM operation");
+  }
+
   Entry getCacheEntry(Addr addr), return_by_pointer="yes" {
     Entry cache_entry := static_cast(Entry, "pointer", cache[addr]);
     return cache_entry;
@@ -378,10 +445,125 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
         Entry cache_entry := getCacheEntry(in_msg.addr);
         TBE tbe := TBEs[in_msg.addr];
 
-        if(in_msg.Type == CoherenceResponseType:DATA_EXCLUSIVE) {
-          trigger(Event:Data_Exclusive, in_msg.addr, cache_entry, tbe);
+        if (in_msg.Type == CoherenceResponseType:L3_SPM_REPLY) {
+          if (in_msg.L3Op == 5) {
+            trigger(Event:L3WritebackData, in_msg.addr, cache_entry, tbe);
+          } else {
+            trigger(Event:L3Reply, in_msg.addr, cache_entry, tbe);
+          }
+        } else if (in_msg.Type == CoherenceResponseType:SPMWB_ACK && isL3SPM(in_msg.DstSPMAddr)) {
+          trigger(Event:L3Reply, in_msg.DstSPMAddr, getCacheEntry(in_msg.DstSPMAddr), TBEs[in_msg.DstSPMAddr]);
+        } else if (in_msg.Type == CoherenceResponseType:SPM_SILENT_RETRY) {
+          trigger(Event:SPM_SilentRetry, in_msg.addr, cache_entry, tbe);
+        } else if (in_msg.Type == CoherenceResponseType:SPM_MCAST_PENDING) {
+          Addr spm_addr := makeLineAddress(in_msg.DstSPMAddr);
+          int spm_set := addressToInt(bitSelect(spm_addr, 6, 15));
+          int spm_way := addressToInt(bitSelect(spm_addr, 16, 18));
+          if (!cache.prepareSPMSlot(spm_set, spm_way)) {
+            Addr victim := cache.spmSlotVictim(spm_set, spm_way);
+            Entry victim_entry := getCacheEntry(victim);
+            TBE victim_tbe := TBEs[victim];
+            State victim_state := getState(victim_tbe, victim_entry, victim);
+            if (is_valid(victim_tbe) || victim_state == State:S_IL0 ||
+                victim_state == State:M_IL0 || victim_state == State:E_IL0 ||
+                victim_state == State:MM_IL0) {
+              trigger(Event:SPM_McastClaimWait, victim, victim_entry,
+                      victim_tbe);
+            } else if (is_valid(victim_entry) &&
+                       inL0Cache(victim_entry.CacheState)) {
+              trigger(Event:L0_Invalidate_Own, victim, victim_entry,
+                      victim_tbe);
+            } else {
+              trigger(Event:L1_Replacement, victim, victim_entry,
+                      victim_tbe);
+            }
+          } else {
+            trigger(Event:SPM_McastPending, spm_addr,
+                    getCacheEntry(spm_addr), TBEs[spm_addr]);
+          }
+        } else if (in_msg.Type == CoherenceResponseType:SPM_MCAST_DATA) {
+          Addr spm_addr := makeLineAddress(in_msg.DstSPMAddr);
+          int spm_set := addressToInt(bitSelect(spm_addr, 6, 15));
+          int spm_way := addressToInt(bitSelect(spm_addr, 16, 18));
+          if (!cache.prepareSPMSlot(spm_set, spm_way)) {
+            Addr victim := cache.spmSlotVictim(spm_set, spm_way);
+            Entry victim_entry := getCacheEntry(victim);
+            TBE victim_tbe := TBEs[victim];
+            State victim_state := getState(victim_tbe, victim_entry, victim);
+            if (is_valid(victim_tbe) ||
+                victim_state == State:S_IL0 ||
+                victim_state == State:M_IL0 ||
+                victim_state == State:E_IL0 ||
+                victim_state == State:MM_IL0) {
+              trigger(Event:SPM_McastClaimWait, victim, victim_entry,
+                      victim_tbe);
+            } else if (is_valid(victim_entry) &&
+                       inL0Cache(victim_entry.CacheState)) {
+              trigger(Event:L0_Invalidate_Own, victim, victim_entry,
+                      victim_tbe);
+            } else {
+              trigger(Event:L1_Replacement, victim, victim_entry,
+                      victim_tbe);
+            }
+          } else {
+            trigger(Event:SPM_McastData, spm_addr, getCacheEntry(spm_addr),
+                    TBEs[spm_addr]);
+          }
+        } else if (in_msg.Type == CoherenceResponseType:SPM_MCAST_ACK) {
+          if (tbe.pendingAcks == 1) {
+            trigger(Event:SPM_McastLastAck, in_msg.addr, cache_entry, tbe);
+          } else {
+            trigger(Event:SPM_McastAck, in_msg.addr, cache_entry, tbe);
+          }
+        } else if (in_msg.Type == CoherenceResponseType:SPM_MCAST_CLAIM) {
+          Addr spm_addr := makeLineAddress(in_msg.DstSPMAddr);
+          int spm_set := addressToInt(bitSelect(spm_addr, 6, 15));
+          int spm_way := addressToInt(bitSelect(spm_addr, 16, 18));
+          if (!cache.prepareSPMSlot(spm_set, spm_way)) {
+            Addr victim := cache.spmSlotVictim(spm_set, spm_way);
+            Entry victim_entry := getCacheEntry(victim);
+            TBE victim_tbe := TBEs[victim];
+            State victim_state := getState(victim_tbe, victim_entry, victim);
+            if (is_valid(victim_tbe) ||
+                victim_state == State:S_IL0 ||
+                victim_state == State:M_IL0 ||
+                victim_state == State:E_IL0 ||
+                victim_state == State:MM_IL0) {
+              trigger(Event:SPM_McastClaimWait, victim, victim_entry,
+                      victim_tbe);
+            } else if (is_valid(victim_entry) &&
+                       inL0Cache(victim_entry.CacheState)) {
+              trigger(Event:L0_Invalidate_Own, victim, victim_entry,
+                      victim_tbe);
+            } else {
+              trigger(Event:L1_Replacement, victim, victim_entry,
+                      victim_tbe);
+            }
+          } else {
+            trigger(Event:SPM_McastClaim, spm_addr,
+                    getCacheEntry(spm_addr), TBEs[spm_addr]);
+          }
+        } else if (in_msg.Type == CoherenceResponseType:SPM_MCAST_CLAIM_ACK) {
+          if (tbe.pendingAcks == 1) {
+            trigger(Event:SPM_McastClaimLastAck, in_msg.addr,
+                    cache_entry, tbe);
+          } else {
+            trigger(Event:SPM_McastClaimAck, in_msg.addr, cache_entry, tbe);
+          }
+        } else if(in_msg.Type == CoherenceResponseType:DATA_EXCLUSIVE) {
+          if (is_valid(tbe) && isL3SPM(tbe.DstSPMAddr)) {
+            trigger(Event:L3SourceData, in_msg.addr, cache_entry, tbe);
+          } else if (is_valid(tbe) && tbe.MulticastMask != 0) {
+            trigger(Event:SPM_McastSourceData, in_msg.addr, cache_entry, tbe);
+          } else {
+            trigger(Event:Data_Exclusive, in_msg.addr, cache_entry, tbe);
+          }
         } else if(in_msg.Type == CoherenceResponseType:DATA) {
-          if ((getState(tbe, cache_entry, in_msg.addr) == State:IS ||
+          if (is_valid(tbe) && isL3SPM(tbe.DstSPMAddr)) {
+            trigger(Event:L3SourceData, in_msg.addr, cache_entry, tbe);
+          } else if (is_valid(tbe) && tbe.MulticastMask != 0) {
+            trigger(Event:SPM_McastSourceData, in_msg.addr, cache_entry, tbe);
+          } else if ((getState(tbe, cache_entry, in_msg.addr) == State:IS ||
                getState(tbe, cache_entry, in_msg.addr) == State:IS_I) &&
               machineIDToMachineType(in_msg.Sender) == MachineType:L1Cache) {
 
@@ -403,7 +585,13 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
         } else if (in_msg.Type == CoherenceResponseType:FLUSH_ACK) {
           trigger(Event:Flush_Ack, in_msg.addr, cache_entry, tbe);
         } else if (in_msg.Type == CoherenceResponseType:PUT_ACK) {
-          trigger(Event:Put_Ack, in_msg.addr, cache_entry, tbe);
+          if (is_valid(tbe) && isL3SPM(tbe.DstSPMAddr)) {
+            trigger(Event:L3SourceAck, in_msg.addr, cache_entry, tbe);
+          } else if (is_valid(tbe) && tbe.MulticastMask != 0) {
+            trigger(Event:SPM_McastPutAck, in_msg.addr, cache_entry, tbe);
+          } else {
+            trigger(Event:Put_Ack, in_msg.addr, cache_entry, tbe);
+          }
         } else if (in_msg.Type == CoherenceResponseType:SPMWB_ACK) {
           Addr spm_addr := makeLineAddress(in_msg.DstSPMAddr);
           Entry spm_entry := getCacheEntry(spm_addr);
@@ -412,6 +600,23 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
           error("Invalid L1 response type");
         }
       }
+    }
+  }
+
+  // Response processing above always drains NACKs into existing transaction
+  // state. Retry issue can wait for request credits without holding a response.
+  in_port(spmSilentRetry_in, Addr, spmSilentRetryTimer) {
+    if (spmSilentRetry_in.isReady(clockEdge())) {
+      Addr retry_addr := spmSilentRetryTimer.nextAddress();
+      trigger(Event:SPM_SilentReissue, retry_addr, getCacheEntry(retry_addr),
+              TBEs[retry_addr]);
+    }
+  }
+
+  in_port(l3Send_in, Addr, l3SendTimer) {
+    if (l3Send_in.isReady(clockEdge())) {
+      Addr a := l3SendTimer.nextAddress();
+      trigger(Event:L3Send, a, getCacheEntry(a), TBEs[a]);
     }
   }
 
@@ -449,7 +654,18 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
             // A silent SPM-copy snapshot. If the freshest data is still down
             // in L0, recall it first (reusing the normal L0 invalidation path);
             // otherwise hand back a snapshot without disturbing coherence.
-            if (is_valid(cache_entry) && inL0Cache(cache_entry.CacheState)) {
+            State state := getState(tbe, cache_entry, in_msg.addr);
+            if (spm_silent_retry && (state == State:I || state == State:IS ||
+                state == State:IM || state == State:IS_I || state == State:IX_A)) {
+                trigger(Event:Fwd_GETS_SilentRetry, in_msg.addr, cache_entry, tbe);
+            } else if (state == State:S || state == State:SM) {
+                // VER-11 fix: in S/SM the L0 copy is clean, so this L1's block is
+                // current; serve the snapshot without an L0 recall. A stale
+                // fire-and-forget forward can reach a former owner that has since
+                // downgraded (S) and re-requested ownership (SM); recalling L0 there
+                // moved SM -> SM_IL0, where the upgrade's Ack has no transition.
+                trigger(Event:Fwd_GETS_Silent, in_msg.addr, cache_entry, tbe);
+            } else if (is_valid(cache_entry) && inL0Cache(cache_entry.CacheState)) {
                 trigger(Event:L0_Invalidate_Else, in_msg.addr,
                         cache_entry, tbe);
             } else {
@@ -464,6 +680,52 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     }
   }
 
+  // Finite mode returns evictions and recalls here. Process this ordered
+  // lane BEFORE local requests: a re-fetch must not pass its older PUTX.
+  // SLICC in_port source order sets service priority; rank alone does not.
+  // Legacy mode leaves this input empty (replyToL1 aliases bufferFromL0).
+  // Keep recall/eviction returns independent of BOTH demand and pure-SPM
+  // requests. The latter can stall and must never head-of-line block a recall.
+  in_port(returnBufferFromL0_in, CoherenceMsg, returnBufferFromL0, rank = 3) {
+    if (returnBufferFromL0_in.isReady(clockEdge())) {
+      peek(returnBufferFromL0_in, CoherenceMsg) {
+        Entry cache_entry := getCacheEntry(in_msg.addr);
+        TBE tbe := TBEs[in_msg.addr];
+
+        if (in_msg.Class == CoherenceClass:INV_DATA) {
+          trigger(Event:L0_DataAckEscape, in_msg.addr, cache_entry, tbe);
+        } else if (in_msg.Class == CoherenceClass:INV_ACK) {
+          trigger(Event:L0_AckEscape, in_msg.addr, cache_entry, tbe);
+        } else if (in_msg.Class == CoherenceClass:PUTX) {
+          trigger(Event:WriteBackEscape, in_msg.addr, cache_entry, tbe);
+        } else {
+          error("Invalid request on independent L0 return buffer");
+        }
+      }
+    }
+  }
+
+  in_port(spmBufferFromL0_in, CoherenceMsg, spmBufferFromL0, rank = 3) {
+    if (spmBufferFromL0_in.isReady(clockEdge())) {
+      peek(spmBufferFromL0_in, CoherenceMsg) {
+        Entry cache_entry := getCacheEntry(in_msg.addr);
+        TBE tbe := TBEs[in_msg.addr];
+        if (isL3SPM(in_msg.DstSPMAddr)) {
+          assert(l3_spm_enabled);
+          trigger(Event:L3ForwardDirect, in_msg.addr, cache_entry, tbe);
+        } else if (in_msg.Class == CoherenceClass:SPM_LD) {
+          trigger(Event:SPMLD_direct, in_msg.addr, cache_entry, tbe);
+        } else if (in_msg.Class == CoherenceClass:SPM_ST) {
+          trigger(Event:SPMST_direct, in_msg.addr, cache_entry, tbe);
+        } else if (in_msg.Class == CoherenceClass:SPMWB_READ) {
+          trigger(Event:SPMWB_read_direct, in_msg.addr, cache_entry, tbe);
+        } else {
+          error("Invalid request on direct SPM L0->L1 buffer");
+        }
+      }
+    }
+  }
+
   // Requests to this L1 cache from the L0 cache.
   in_port(messageBufferFromL0_in, CoherenceMsg, bufferFromL0, rank = 0) {
     if (messageBufferFromL0_in.isReady(clockEdge())) {
@@ -471,7 +733,36 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
         Entry cache_entry := getCacheEntry(in_msg.addr);
         TBE tbe := TBEs[in_msg.addr];
 
-        if(in_msg.Class == CoherenceClass:INV_DATA) {
+        if (isL3SPM(in_msg.DstSPMAddr) && in_msg.Class != CoherenceClass:SPMCP_FETCH) {
+            assert(l3_spm_enabled);
+            if (in_msg.Class == CoherenceClass:SPMWB_STORE) {
+              trigger(Event:L3ForwardWB, in_msg.addr, cache_entry, tbe);
+            } else {
+              trigger(Event:L3Forward, in_msg.addr, cache_entry, tbe);
+            }
+        } else if (!isL3SPM(in_msg.DstSPMAddr) && (in_msg.Class == CoherenceClass:SPMCP_FETCH ||
+             in_msg.Class == CoherenceClass:SPMCP_INSTALL) &&
+            !cache.prepareSPMSlot(in_msg.SPMSet, in_msg.SPMWay)) {
+            // Dynamic conversion keeps all ways cache-usable until SPMCP.
+            // If the encoded slot is live and no empty unclaimed way can
+            // accept migration, evict it through the normal coherence path,
+            // leave this SPMCP queued, and retry after replacement completes.
+            Addr victim := cache.spmSlotVictim(in_msg.SPMSet, in_msg.SPMWay);
+            Entry victim_entry := getCacheEntry(victim);
+            TBE victim_tbe := TBEs[victim];
+            if (is_valid(victim_entry) && inL0Cache(victim_entry.CacheState)) {
+                trigger(Event:L0_Invalidate_Own,
+                        victim, victim_entry, victim_tbe);
+            } else {
+                trigger(Event:L1_Replacement,
+                        victim, victim_entry, victim_tbe);
+            }
+        } else if (in_msg.Class == CoherenceClass:SPMCP_FETCH &&
+                   in_msg.MulticastClaim) {
+            Addr spm_addr := makeLineAddress(in_msg.DstSPMAddr);
+            trigger(Event:SPM_McastClaimLocal, spm_addr,
+                    getCacheEntry(spm_addr), TBEs[spm_addr]);
+        } else if(in_msg.Class == CoherenceClass:INV_DATA) {
             trigger(Event:L0_DataAck, in_msg.addr, cache_entry, tbe);
         }  else if (in_msg.Class == CoherenceClass:NAK) {
               trigger(Event:L0_DataNak, in_msg.addr, cache_entry, tbe);
@@ -485,6 +776,8 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
             trigger(Event:Flush_NP, in_msg.addr, cache_entry, tbe);
         }  else if (in_msg.Class == CoherenceClass:FLUSH_DATA) {
             trigger(Event:External_Flush_Data_Ack, in_msg.addr, cache_entry, tbe);
+        }  else if (in_msg.Class == CoherenceClass:SPMCP_FETCH && in_msg.SPMSnapshot) {
+            trigger(Event:SPMCP_snapshot, in_msg.addr, cache_entry, tbe);
         }  else if (in_msg.Class == CoherenceClass:SPMCP_FETCH ||
                     in_msg.Class == CoherenceClass:SPMCP_INSTALL ||
                     in_msg.Class == CoherenceClass:SPM_LD ||
@@ -524,30 +817,15 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     }
   }
 
-  // Pure SPM requests from L0 use a dedicated path.  These requests target
-  // private-L2 SPM slots directly and do not participate in coherent cache
-  // lookup/replacement traffic.  They are intentionally separated from
-  // bufferFromL0 so a low-latency SPM request cannot violate the FIFO ordering
-  // of older regular cache requests.
-  in_port(spmBufferFromL0_in, CoherenceMsg, spmBufferFromL0, rank = 0) {
-    if (spmBufferFromL0_in.isReady(clockEdge())) {
-      peek(spmBufferFromL0_in, CoherenceMsg) {
-        Entry cache_entry := getCacheEntry(in_msg.addr);
-        TBE tbe := TBEs[in_msg.addr];
-
-        if (in_msg.Class == CoherenceClass:SPM_LD) {
-          trigger(Event:SPMLD_direct, in_msg.addr, cache_entry, tbe);
-        } else if (in_msg.Class == CoherenceClass:SPM_ST) {
-          trigger(Event:SPMST_direct, in_msg.addr, cache_entry, tbe);
-        } else if (in_msg.Class == CoherenceClass:SPMWB_READ) {
-          trigger(Event:SPMWB_read_direct, in_msg.addr, cache_entry, tbe);
-        } else {
-          error("Invalid request on direct SPM L0->L1 buffer");
-        }
-      }
-    }
+  // Separate physical storage credits from transient protocol metadata.
+  action(micro_miss, "mmm", desc="MICRO private L2 miss") {
+    check_allocate(missCredits);
+    missCredits.allocate(address);
   }
-
+  action(micro_write, "mmw", desc="Private L2 eviction snapshot") {
+    check_allocate(writeCredits);
+    writeCredits.allocate(address);
+  }
   // ACTIONS
   action(a_issueGETS, "a", desc="Issue GETS") {
     peek(messageBufferFromL0_in, CoherenceMsg) {
@@ -599,6 +877,139 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
         out_msg.Prefetch := in_msg.Prefetch;
       }
     }
+  }
+
+  action(l3_forward, "l3f", desc="Send shared SPM operation through the finite request network") {
+    peek(messageBufferFromL0_in, CoherenceMsg) {
+      enqueue(requestNetwork_out, RequestMsg, l1_request_latency) {
+        out_msg.addr := in_msg.DstSPMAddr;
+        out_msg.DstSPMAddr := in_msg.DstSPMAddr;
+        out_msg.SrcAddr := in_msg.SrcAddr;
+        out_msg.L3ReplyAddr := in_msg.addr;
+        out_msg.L3Op := l3Operation(in_msg.Class);
+        if (in_msg.Class == CoherenceClass:SPM_ST && bitSelect(in_msg.SrcAddr, 60, 60) == intToAddress(1)) {
+          out_msg.L3Op := 7;
+        }
+        out_msg.Type := CoherenceRequestType:L3_SPM;
+        out_msg.Requestor := machineID;
+        out_msg.Destination.add(createMachineID(MachineType:L2Cache,
+          intToID(addressToInt(bitSelect(in_msg.DstSPMAddr, 20, 22)))));
+        out_msg.Len := in_msg.Len;
+        if (in_msg.Class == CoherenceClass:SPMWB_STORE) { out_msg.Len := 64; }
+        if (in_msg.Class == CoherenceClass:SPMWB_STORE && in_msg.L3Finalize != intToAddress(0)) {
+          out_msg.L3Op := 8;
+          out_msg.SrcAddr := in_msg.L3Finalize;
+          out_msg.Len := 128;
+        }
+        out_msg.AccessMode := in_msg.AccessMode;
+        out_msg.DataBlk := in_msg.DataBlk;
+        out_msg.SPMMasked := in_msg.SPMMasked;
+        out_msg.SPMWriteMask := in_msg.SPMWriteMask;
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+        if (out_msg.L3Op == 8) { out_msg.MessageSize := MessageSizeType:SPM_FinalizeControl; }
+        if (in_msg.Class == CoherenceClass:SPM_ST) {
+          out_msg.MessageSize := l3DataSize(in_msg.Len);
+          if (out_msg.L3Op == 7) {
+            out_msg.MessageSize := MessageSizeType:SPM_Reduce256;
+            if (bitSelect(in_msg.SrcAddr, 58, 58) == intToAddress(1)) {
+              out_msg.MessageSize := MessageSizeType:SPM_Reduce128;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  action(l3_forwardDirect, "l3fd", desc="Send shared SPM operation through the finite request network") {
+    peek(spmBufferFromL0_in, CoherenceMsg) {
+      enqueue(requestNetwork_out, RequestMsg, l1_request_latency) {
+        out_msg.addr := in_msg.DstSPMAddr;
+        out_msg.DstSPMAddr := in_msg.DstSPMAddr;
+        out_msg.SrcAddr := in_msg.SrcAddr;
+        out_msg.L3ReplyAddr := in_msg.addr;
+        out_msg.L3Op := l3Operation(in_msg.Class);
+        if (in_msg.Class == CoherenceClass:SPM_ST && bitSelect(in_msg.SrcAddr, 60, 60) == intToAddress(1)) {
+          out_msg.L3Op := 7;
+        }
+        out_msg.Type := CoherenceRequestType:L3_SPM;
+        out_msg.Requestor := machineID;
+        out_msg.Destination.add(createMachineID(MachineType:L2Cache,
+          intToID(addressToInt(bitSelect(in_msg.DstSPMAddr, 20, 22)))));
+        out_msg.Len := in_msg.Len;
+        out_msg.AccessMode := in_msg.AccessMode;
+        out_msg.DataBlk := in_msg.DataBlk;
+        out_msg.SPMMasked := in_msg.SPMMasked;
+        out_msg.SPMWriteMask := in_msg.SPMWriteMask;
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+        if (in_msg.Class == CoherenceClass:SPM_ST) {
+          out_msg.MessageSize := l3DataSize(in_msg.Len);
+          if (out_msg.L3Op == 7) {
+            out_msg.MessageSize := MessageSizeType:SPM_Reduce256;
+            if (bitSelect(in_msg.SrcAddr, 58, 58) == intToAddress(1)) {
+              out_msg.MessageSize := MessageSizeType:SPM_Reduce128;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  action(l3_schedule, "l3sched", desc="Retain snapshot in existing TBE and free response FIFO") {
+    l3SendTimer.set(address, clockEdge() + cyclesToTicks(intToCycles(1)));
+  }
+
+  action(l3_sendInstall, "l3send", desc="Send released source snapshot to shared slot") {
+    assert(is_valid(tbe));
+    assert(l3_spm_enabled);
+    enqueue(requestNetwork_out, RequestMsg, l1_request_latency) {
+      out_msg.addr := tbe.DstSPMAddr;
+      out_msg.DstSPMAddr := tbe.DstSPMAddr;
+      out_msg.SrcAddr := tbe.SrcAddr;
+      out_msg.L3ReplyAddr := address;
+      out_msg.L3Op := 4;
+      out_msg.Type := CoherenceRequestType:L3_SPM;
+      out_msg.Requestor := machineID;
+      out_msg.Destination.add(createMachineID(MachineType:L2Cache,
+        intToID(addressToInt(bitSelect(tbe.DstSPMAddr, 20, 22)))));
+      out_msg.Len := 64;
+      out_msg.DataBlk := tbe.DataBlk;
+      out_msg.MessageSize := MessageSizeType:Data;
+    }
+    l3SendTimer.unset(address);
+  }
+
+  action(l3_reply, "l3r", desc="Complete shared slot operation only after LLC service") {
+    peek(responseNetwork_in, ResponseMsg) {
+      enqueue(spmBufferToL0_out, CoherenceMsg, spm_access_response_latency) {
+        out_msg.addr := address;
+        out_msg.Class := CoherenceClass:SPM_ACK;
+        if (in_msg.L3Op == 1) { out_msg.Class := CoherenceClass:SPM_DATA; }
+        out_msg.Sender := machineID;
+        out_msg.Dest := createMachineID(MachineType:L0Cache, version);
+        out_msg.DataBlk := in_msg.DataBlk;
+        out_msg.Len := in_msg.Len;
+        out_msg.MessageSize := in_msg.MessageSize;
+      }
+    }
+  }
+
+  action(l3_writeback, "l3wb", desc="Forward shared SPM snapshot through normal coherent overwrite protocol") {
+      assert(is_valid(tbe));
+      assert(tbe.Len <= 64);
+      enqueue(requestNetwork_out, RequestMsg, l1_request_latency) {
+        out_msg.addr := tbe.SrcAddr;
+        out_msg.SrcAddr := tbe.SrcAddr;
+        out_msg.DstSPMAddr := tbe.DstSPMAddr;
+        out_msg.Type := CoherenceRequestType:SPMWB_REQ;
+        out_msg.Len := 64;
+        out_msg.DataBlk := tbe.DataBlk;
+        out_msg.Dirty := true;
+        out_msg.Requestor := machineID;
+        out_msg.Destination.add(mapAddressToRange(tbe.SrcAddr, MachineType:L2Cache,
+            l2_select_low_bit, l2_select_num_bits, clusterID));
+        out_msg.MessageSize := MessageSizeType:Writeback_Data;
+      }
+      l3SendTimer.unset(address);
   }
 
   action(spm_issueGETSSilent, "spgs", desc="Issue GETS_SILENT for absent SPM source") {
@@ -828,6 +1239,47 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     }
   }
 
+  action(spm_nackSilentGetS, "spnk", desc="NACK stale-owner forward on response channel") {
+    peek(requestNetwork_in, RequestMsg) {
+      enqueue(responseNetwork_out, ResponseMsg, l1_response_latency) {
+        out_msg.addr := address;
+        out_msg.DstSPMAddr := in_msg.DstSPMAddr;
+        out_msg.Type := CoherenceResponseType:SPM_SILENT_RETRY;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Response_Control;
+      }
+    }
+  }
+
+  action(spm_rememberSilentRetry, "sprm", desc="Consume NACK without waiting for request FIFO space") {
+    assert(spm_silent_retry);
+    assert(is_valid(tbe));
+    assert(!spmSilentRetryTimer.isSet(address));
+    peek(responseNetwork_in, ResponseMsg) {
+      assert(tbe.DstSPMAddr == in_msg.DstSPMAddr);
+    }
+    // No credit release/reallocation: this is still the same outstanding copy.
+    spmSilentRetryTimer.set(address, clockEdge() + cyclesToTicks(spm_silent_retry_latency));
+  }
+
+  action(spm_reissueSilentGetS, "sprs", desc="Retry from bounded existing TBE; network input already released") {
+    assert(is_valid(tbe));
+    assert(spmSilentRetryTimer.isSet(address));
+    enqueue(requestNetwork_out, RequestMsg, l1_request_latency) {
+      out_msg.addr := address;
+      out_msg.SrcAddr := tbe.SrcAddr;
+      out_msg.DstSPMAddr := tbe.DstSPMAddr;
+      out_msg.Type := CoherenceRequestType:GETS_SILENT;
+      out_msg.Requestor := machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, clusterID));
+      out_msg.MessageSize := MessageSizeType:Control;
+      out_msg.AccessMode := tbe.SilentAccessMode;
+    }
+    spmSilentRetryTimer.unset(address);
+  }
+
   action(spm_sendSilentDataToRequestor, "spsd", desc="send an SPM data snapshot to a silent requester without any coherence-state change") {
     peek(requestNetwork_in, RequestMsg) {
       enqueue(responseNetwork_out, ResponseMsg, l1_response_latency) {
@@ -1034,11 +1486,22 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     TBEs.allocate(address);
     set_tbe(TBEs[address]);
     peek(messageBufferFromL0_in, CoherenceMsg) {
+      tbe.SilentAccessMode := in_msg.AccessMode;
       tbe.SrcAddr := in_msg.SrcAddr;
       tbe.DstSPMAddr := in_msg.DstSPMAddr;
       tbe.SPMSet := in_msg.SPMSet;
       tbe.SPMWay := in_msg.SPMWay;
       tbe.Len := in_msg.Len;
+      tbe.MulticastMask := in_msg.MulticastMask;
+    }
+  }
+
+  action(spm_bufferL0Snapshot, "spb0", desc="Capture SPMCP payload without changing coherent source") {
+    peek(messageBufferFromL0_in, CoherenceMsg) {
+      assert(is_valid(tbe));
+      assert(in_msg.SPMSnapshot);
+      tbe.DataBlk := in_msg.DataBlk;
+      tbe.Dirty := in_msg.Dirty;
     }
   }
 
@@ -1047,6 +1510,35 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
       assert(is_valid(tbe));
       tbe.DataBlk := in_msg.DataBlk;
     }
+  }
+
+  action(spm_sendMulticastPending, "spmp", desc="Announce pending multicast destination slots") {
+    if (tbe.MulticastMask != 0) {
+      enqueue(responseNetwork_out, ResponseMsg, l1_response_latency) {
+        out_msg.addr := tbe.DstSPMAddr;
+        out_msg.SrcAddr := tbe.SrcAddr;
+        out_msg.DstSPMAddr := tbe.DstSPMAddr;
+        out_msg.Type := CoherenceResponseType:SPM_MCAST_PENDING;
+        out_msg.Sender := machineID;
+        out_msg.MulticastMask := tbe.MulticastMask;
+        if (bitSelect(intToAddress(tbe.MulticastMask), 0, 0) == intToAddress(1) && version != intToID(0)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(0))); }
+        if (bitSelect(intToAddress(tbe.MulticastMask), 1, 1) == intToAddress(1) && version != intToID(1)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(1))); }
+        if (bitSelect(intToAddress(tbe.MulticastMask), 2, 2) == intToAddress(1) && version != intToID(2)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(2))); }
+        if (bitSelect(intToAddress(tbe.MulticastMask), 3, 3) == intToAddress(1) && version != intToID(3)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(3))); }
+        if (bitSelect(intToAddress(tbe.MulticastMask), 4, 4) == intToAddress(1) && version != intToID(4)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(4))); }
+        if (bitSelect(intToAddress(tbe.MulticastMask), 5, 5) == intToAddress(1) && version != intToID(5)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(5))); }
+        if (bitSelect(intToAddress(tbe.MulticastMask), 6, 6) == intToAddress(1) && version != intToID(6)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(6))); }
+        if (bitSelect(intToAddress(tbe.MulticastMask), 7, 7) == intToAddress(1) && version != intToID(7)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(7))); }
+        out_msg.MessageSize := MessageSizeType:Response_Control;
+      }
+    }
+  }
+
+  action(spm_bufferCacheData, "spbc", desc="Buffer resident source for multicast") {
+    assert(is_valid(tbe));
+    assert(is_valid(cache_entry));
+    tbe.DataBlk := cache_entry.DataBlk;
+    tbe.Dirty := cache_entry.Dirty;
   }
 
   action(spm_installFromTBE, "spit", desc="Install buffered data into SPM slot") {
@@ -1109,8 +1601,194 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     }
   }
 
+  action(spm_sendMulticastFromTBE, "spmt", desc="Multicast buffered SPM data to remote private L1s") {
+    assert(is_valid(tbe));
+    enqueue(responseNetwork_out, ResponseMsg, l1_response_latency) {
+      out_msg.addr := tbe.DstSPMAddr;
+      out_msg.SrcAddr := tbe.SrcAddr;
+      out_msg.DstSPMAddr := tbe.DstSPMAddr;
+      out_msg.Type := CoherenceResponseType:SPM_MCAST_DATA;
+      out_msg.DataBlk := tbe.DataBlk;
+      out_msg.Dirty := false;
+      out_msg.Sender := machineID;
+      out_msg.MulticastMask := tbe.MulticastMask;
+      if (bitSelect(intToAddress(tbe.MulticastMask), 0, 0) == intToAddress(1) && version != intToID(0)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(0))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 1, 1) == intToAddress(1) && version != intToID(1)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(1))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 2, 2) == intToAddress(1) && version != intToID(2)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(2))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 3, 3) == intToAddress(1) && version != intToID(3)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(3))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 4, 4) == intToAddress(1) && version != intToID(4)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(4))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 5, 5) == intToAddress(1) && version != intToID(5)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(5))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 6, 6) == intToAddress(1) && version != intToID(6)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(6))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 7, 7) == intToAddress(1) && version != intToID(7)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(7))); }
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+
+  action(spm_sendRetainedMulticast, "sprmc", desc="Multicast buffered SPM data to remote private L1s") {
+    assert(is_valid(tbe));
+    if (tbe.MulticastMask != 0) {
+    enqueue(responseNetwork_out, ResponseMsg, l1_response_latency) {
+      out_msg.addr := tbe.DstSPMAddr;
+      out_msg.SrcAddr := tbe.SrcAddr;
+      out_msg.DstSPMAddr := tbe.DstSPMAddr;
+      out_msg.Type := CoherenceResponseType:SPM_MCAST_DATA;
+      out_msg.DataBlk := tbe.DataBlk;
+      out_msg.Dirty := false;
+      out_msg.Sender := machineID;
+      out_msg.MulticastMask := tbe.MulticastMask;
+      if (bitSelect(intToAddress(tbe.MulticastMask), 0, 0) == intToAddress(1) && version != intToID(0)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(0))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 1, 1) == intToAddress(1) && version != intToID(1)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(1))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 2, 2) == intToAddress(1) && version != intToID(2)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(2))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 3, 3) == intToAddress(1) && version != intToID(3)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(3))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 4, 4) == intToAddress(1) && version != intToID(4)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(4))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 5, 5) == intToAddress(1) && version != intToID(5)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(5))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 6, 6) == intToAddress(1) && version != intToID(6)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(6))); }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 7, 7) == intToAddress(1) && version != intToID(7)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(7))); }
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+    }
+  }
+
+  action(spm_sendMulticastClaim, "spmc", desc="Ask remote private L1s to reserve this SPM slot") {
+    assert(is_valid(tbe));
+    tbe.pendingAcks := 0;
+    enqueue(responseNetwork_out, ResponseMsg, l1_response_latency) {
+      out_msg.addr := tbe.DstSPMAddr;
+      out_msg.SrcAddr := tbe.SrcAddr;
+      out_msg.DstSPMAddr := tbe.DstSPMAddr;
+      out_msg.Type := CoherenceResponseType:SPM_MCAST_CLAIM;
+      out_msg.Sender := machineID;
+      out_msg.MulticastMask := tbe.MulticastMask;
+      if (bitSelect(intToAddress(tbe.MulticastMask), 0, 0) == intToAddress(1) && version != intToID(0)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(0))); tbe.pendingAcks := tbe.pendingAcks + 1; }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 1, 1) == intToAddress(1) && version != intToID(1)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(1))); tbe.pendingAcks := tbe.pendingAcks + 1; }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 2, 2) == intToAddress(1) && version != intToID(2)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(2))); tbe.pendingAcks := tbe.pendingAcks + 1; }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 3, 3) == intToAddress(1) && version != intToID(3)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(3))); tbe.pendingAcks := tbe.pendingAcks + 1; }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 4, 4) == intToAddress(1) && version != intToID(4)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(4))); tbe.pendingAcks := tbe.pendingAcks + 1; }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 5, 5) == intToAddress(1) && version != intToID(5)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(5))); tbe.pendingAcks := tbe.pendingAcks + 1; }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 6, 6) == intToAddress(1) && version != intToID(6)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(6))); tbe.pendingAcks := tbe.pendingAcks + 1; }
+      if (bitSelect(intToAddress(tbe.MulticastMask), 7, 7) == intToAddress(1) && version != intToID(7)) { out_msg.Destination.add(createMachineID(MachineType:L1Cache, intToID(7))); tbe.pendingAcks := tbe.pendingAcks + 1; }
+      out_msg.MessageSize := MessageSizeType:Response_Control;
+    }
+    assert(tbe.pendingAcks > 0);
+  }
+
+  action(spm_installMulticastClaim, "spmci", desc="Reserve a remotely claimed SPM slot") {
+    peek(responseNetwork_in, ResponseMsg) {
+      Entry spm_entry := static_cast(Entry, "pointer", cache[in_msg.DstSPMAddr]);
+      int spm_set := addressToInt(bitSelect(in_msg.DstSPMAddr, 6, 15));
+      int spm_way := addressToInt(bitSelect(in_msg.DstSPMAddr, 16, 18));
+      if (is_invalid(spm_entry)) {
+        spm_entry := static_cast(Entry, "pointer",
+            cache.allocateSPMSlot(in_msg.DstSPMAddr, spm_set, spm_way,
+                                  new Entry));
+      }
+      spm_entry.CacheState := State:X;
+      spm_entry.DataBlk.clear();
+      spm_entry.Dirty := false;
+      spm_entry.setScratchpad(true);
+      spm_entry.SrcAddr := in_msg.SrcAddr;
+      spm_entry.DstSPMAddr := in_msg.DstSPMAddr;
+      spm_entry.SPMSet := spm_set;
+      spm_entry.SPMWay := spm_way;
+      spm_entry.Len := 64;
+    }
+  }
+
+  action(spm_sendMulticastClaimAck, "spmca", desc="Acknowledge a remote SPM slot claim") {
+    enqueue(responseNetwork_out, ResponseMsg, l1_response_latency) {
+      peek(responseNetwork_in, ResponseMsg) {
+        out_msg.addr := in_msg.DstSPMAddr;
+        out_msg.DstSPMAddr := in_msg.DstSPMAddr;
+        out_msg.Type := CoherenceResponseType:SPM_MCAST_CLAIM_ACK;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Sender);
+        out_msg.AckCount := 1;
+        out_msg.MessageSize := MessageSizeType:Response_Control;
+      }
+    }
+  }
+
+  action(spm_claimAckToL0, "spmcal", desc="Complete a multicast way claim at its issuing L0") {
+    spmZeroData.clear();
+    enqueue(spmBufferToL0_out, CoherenceMsg, spm_response_latency) {
+      assert(is_valid(tbe));
+      // Claim-only SPMCPs use the canonical destination slot as their
+      // Sequencer transaction key because they perform no coherent fetch.
+      out_msg.addr := tbe.DstSPMAddr;
+      out_msg.Class := CoherenceClass:SPM_ACK;
+      out_msg.Sender := machineID;
+      out_msg.Dest := createMachineID(MachineType:L0Cache, version);
+      out_msg.DataBlk := spmZeroData;
+      out_msg.MessageSize := MessageSizeType:Response_Control;
+    }
+  }
+
+  action(spm_installMulticastData, "spmi", desc="Install multicast data in this private SPM") {
+    peek(responseNetwork_in, ResponseMsg) {
+      Entry spm_entry := static_cast(Entry, "pointer", cache[in_msg.DstSPMAddr]);
+      int spm_set := addressToInt(bitSelect(in_msg.DstSPMAddr, 6, 15));
+      int spm_way := addressToInt(bitSelect(in_msg.DstSPMAddr, 16, 18));
+      if (is_invalid(spm_entry)) {
+        spm_entry := static_cast(Entry, "pointer",
+            cache.allocateSPMSlot(in_msg.DstSPMAddr, spm_set, spm_way,
+                                  new Entry));
+      }
+      spm_entry.CacheState := State:X;
+      spm_entry.DataBlk := in_msg.DataBlk;
+      spm_entry.Dirty := false;
+      spm_entry.setScratchpad(true);
+      spm_entry.SrcAddr := in_msg.SrcAddr;
+      spm_entry.DstSPMAddr := in_msg.DstSPMAddr;
+      spm_entry.SPMSet := spm_set;
+      spm_entry.SPMWay := spm_way;
+      spm_entry.Len := 64;
+    }
+  }
+
+  action(spm_installMulticastPending, "spmip", desc="Mark remote SPM slot pending") {
+    peek(responseNetwork_in, ResponseMsg) {
+      Entry spm_entry := static_cast(Entry, "pointer", cache[in_msg.DstSPMAddr]);
+      int spm_set := addressToInt(bitSelect(in_msg.DstSPMAddr, 6, 15));
+      int spm_way := addressToInt(bitSelect(in_msg.DstSPMAddr, 16, 18));
+      if (is_invalid(spm_entry)) {
+        spm_entry := static_cast(Entry, "pointer",
+            cache.allocateSPMSlot(in_msg.DstSPMAddr, spm_set, spm_way,
+                                  new Entry));
+      }
+      spm_entry.CacheState := State:XP;
+      spm_entry.Dirty := false;
+      spm_entry.setScratchpad(true);
+      spm_entry.SrcAddr := in_msg.SrcAddr;
+      spm_entry.DstSPMAddr := in_msg.DstSPMAddr;
+      spm_entry.SPMSet := spm_set;
+      spm_entry.SPMWay := spm_way;
+      spm_entry.Len := 64;
+    }
+  }
+
+  action(spm_sendMulticastAck, "spma", desc="Acknowledge remote multicast installation") {
+    enqueue(responseNetwork_out, ResponseMsg, l1_response_latency) {
+      peek(responseNetwork_in, ResponseMsg) {
+        out_msg.addr := in_msg.SrcAddr;
+        out_msg.DstSPMAddr := in_msg.DstSPMAddr;
+        out_msg.Type := CoherenceResponseType:SPM_MCAST_ACK;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Sender);
+        out_msg.AckCount := 1;
+        out_msg.MessageSize := MessageSizeType:Response_Control;
+      }
+    }
+  }
+
+  action(spm_decrementMulticastAck, "spmd", desc="Consume one multicast acknowledgement") {
+    assert(is_valid(tbe));
+    assert(tbe.pendingAcks > 0);
+    tbe.pendingAcks := tbe.pendingAcks - 1;
+  }
+
   action(spm_releaseSlot, "sprl", desc="Release private-L1 SPM slot") {
     assert(is_valid(cache_entry));
+    cache.releaseSPMSlot(address);
     cache_entry.setScratchpad(false);
     cache_entry.SPMSet := 0;
     cache_entry.SPMWay := 0;
@@ -1219,7 +1897,12 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     peek(messageBufferFromL0_in, CoherenceMsg) {
       assert(is_valid(cache_entry));
       assert(cache_entry.isScratchpad());
-      cache.writeSPMData(in_msg.DstSPMAddr, in_msg.DataBlk, in_msg.Len);
+      if (in_msg.SPMMasked) {
+        cache.writeSPMDataMasked(in_msg.DstSPMAddr, in_msg.DataBlk,
+                                in_msg.Len, in_msg.SPMWriteMask);
+      } else {
+        cache.writeSPMData(in_msg.DstSPMAddr, in_msg.DataBlk, in_msg.Len);
+      }
       cache_entry.Dirty := true;
     }
   }
@@ -1228,7 +1911,12 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     peek(spmBufferFromL0_in, CoherenceMsg) {
       assert(is_valid(cache_entry));
       assert(cache_entry.isScratchpad());
-      cache.writeSPMData(in_msg.DstSPMAddr, in_msg.DataBlk, in_msg.Len);
+      if (in_msg.SPMMasked) {
+        cache.writeSPMDataMasked(in_msg.DstSPMAddr, in_msg.DataBlk,
+                                in_msg.Len, in_msg.SPMWriteMask);
+      } else {
+        cache.writeSPMData(in_msg.DstSPMAddr, in_msg.DataBlk, in_msg.Len);
+      }
       cache_entry.Dirty := true;
     }
   }
@@ -1262,11 +1950,21 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   action(k_popL0RequestQueue, "k", desc="Pop mandatory queue.") {
+    peek(messageBufferFromL0_in, CoherenceMsg) {
+      if (in_msg.Class == CoherenceClass:SPMCP_FETCH ||
+          in_msg.Class == CoherenceClass:SPMWB_STORE) {
+        l0WriteCredits.release(in_msg.addr);
+      }
+    }
     messageBufferFromL0_in.dequeue(clockEdge());
   }
 
   action(k_spmPopL0RequestQueue, "kspm", desc="Pop direct SPM L0 request queue.") {
     spmBufferFromL0_in.dequeue(clockEdge());
+  }
+
+  action(k_popL0ReturnQueue, "kret", desc="Pop ordered L0 recall/eviction return queue.") {
+    returnBufferFromL0_in.dequeue(clockEdge());
   }
 
   action(l_popL2RequestQueue, "l",
@@ -1282,12 +1980,18 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   action(s_deallocateTBE, "s", desc="Deallocate TBE") {
+    assert(!spmSilentRetryTimer.isSet(address));
+    missCredits.release(address);
+    writeCredits.release(address);
     TBEs.deallocate(address);
     unset_tbe();
   }
 
   action(u_writeDataFromL0Request, "ureql0", desc="Write data to cache") {
     peek(messageBufferFromL0_in, CoherenceMsg) {
+      if (in_msg.Class == CoherenceClass:PUTX) {
+        l0WriteCredits.release(address);
+      }
       assert(is_valid(cache_entry));
       if (in_msg.Dirty) {
           cache_entry.DataBlk := in_msg.DataBlk;
@@ -1310,6 +2014,19 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
       if (in_msg.Dirty) {
           cache_entry.DataBlk := in_msg.DataBlk;
           cache_entry.Dirty := in_msg.Dirty;
+      }
+    }
+  }
+
+  action(u_writeDataFromEscape, "uresescape", desc="Recall data from independent return lane") {
+    peek(returnBufferFromL0_in, CoherenceMsg) {
+      if (in_msg.Class == CoherenceClass:PUTX) {
+        l0WriteCredits.release(address);
+      }
+      assert(is_valid(cache_entry));
+      if (in_msg.Dirty) {
+        cache_entry.DataBlk := in_msg.DataBlk;
+        cache_entry.Dirty := in_msg.Dirty;
       }
     }
   }
@@ -1350,6 +2067,10 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     stall_and_wait(requestNetwork_in, address);
   }
 
+  action(z3_stallAndWaitResponseQueue, "\z3", desc="wait for an SPM claim victim from the response network") {
+    stall_and_wait(responseNetwork_in, address);
+  }
+
   action(kd_wakeUpDependents, "kd", desc="wake-up dependents") {
     wakeUpAllBuffers(address);
   }
@@ -1373,12 +2094,12 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     z0_stallAndWaitL0Queue;
   }
 
-  transition({SX_L0, MX_L0, EX_L0, SX_A, MX_A, EX_A, IX_D, XWB},
+  transition({SX_L0, MX_L0, EX_L0, SX_A, MX_A, EX_A, IX_A, IX_D, XWB},
              {Load, Store, L1_Replacement, Flush, External_Flush_Data, Flush_NP}) {
     z0_stallAndWaitL0Queue;
   }
 
-  transition({SX_L0, MX_L0, EX_L0, SX_A, XWB},
+  transition({SX_L0, MX_L0, EX_L0, XWB},
              {Fwd_GETS, Fwd_GETX, Inv}) {
     z2_stallAndWaitL2Queue;
   }
@@ -1411,10 +2132,67 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     l_popL2RequestQueue;
   }
 
-  // GETX/Inv still need the line fully relinquished; hold them until this
-  // core's own SPM fetch has drained (reaches X), as before.
-  transition({MX_A, EX_A}, {Fwd_GETX, Inv}) {
+  // Like M_I -> SINK_WB_ACK: service ownership transfer before our release
+  // ack, retaining the SPM snapshot in the existing TBE. Otherwise the home
+  // waits for GETX completion while our PUT waits behind that same GETX.
+  transition({MX_A, EX_A}, Fwd_GETX, IX_A) {
+    spm_bufferCacheData;
+    dt_sendDataToRequestor_fromTBE;
+    ff_deallocateCacheBlock;
+    l_popL2RequestQueue;
+  }
+
+  transition({MX_A, EX_A}, Inv, IX_A) {
+    spm_bufferCacheData;
+    ft_sendDataToL2_fromTBE;
+    ff_deallocateCacheBlock;
+    l_popL2RequestQueue;
+  }
+
+  transition(SX_A, Fwd_GETS) {
     z2_stallAndWaitL2Queue;
+  }
+
+  transition(SX_A, Fwd_GETX, IX_A) {
+    spm_bufferCacheData;
+    dt_sendDataToRequestor_fromTBE;
+    ff_deallocateCacheBlock;
+    l_popL2RequestQueue;
+  }
+
+  transition(SX_A, Inv, IX_A) {
+    spm_bufferCacheData;
+    fi_sendInvAck;
+    ff_deallocateCacheBlock;
+    l_popL2RequestQueue;
+  }
+
+  transition(IX_A, Inv) {
+    fi_sendInvAck;
+    l_popL2RequestQueue;
+  }
+
+  transition(IX_A, {Fwd_GETS, Fwd_GETX}) {
+    z2_stallAndWaitL2Queue;
+  }
+
+  transition(IX_A, Fwd_GETS_Silent) {
+    spm_bounceSilentGetS;
+    l_popL2RequestQueue;
+  }
+
+  transition({I, IS, IM, IS_I, IX_A}, Fwd_GETS_SilentRetry) {
+    spm_nackSilentGetS;
+    l_popL2RequestQueue;
+  }
+
+  transition(IX_D, SPM_SilentRetry) {
+    spm_rememberSilentRetry;
+    o_popL2ResponseQueue;
+  }
+
+  transition(IX_D, SPM_SilentReissue) {
+    spm_reissueSilentGetS;
   }
 
   // Silent SPM snapshot: the data is resident in this L1 (MM/EE) or this core
@@ -1430,7 +2208,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   // A clean shared copy is an equally valid snapshot: serve it directly.
   // Reachable because a fire-and-forget forward can race this core's
   // ownership downgrade (the home's registration was momentarily stale).
-  transition({SS, SM}, Fwd_GETS_Silent) {
+  transition({S, SS, SM}, Fwd_GETS_Silent) {
     spm_sendSilentDataToRequestor;
     l_popL2RequestQueue;
   }
@@ -1462,39 +2240,102 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
   transition({IS, IM, IS_I, M_I, SM, SINK_WB_ACK, S_IL0, M_IL0, E_IL0,
               MM_IL0, I_F, V_F, D_F, IX_D, SX_L0, MX_L0, EX_L0,
-              SX_A, MX_A, EX_A, XWB},
-             {SPMCP_fetch, SPMCP_install, SPMLD, SPMST, SPMWB_read,
+              SX_A, MX_A, EX_A, IX_A, XWB, XC},
+             {SPMCP_snapshot, SPMCP_fetch, SPMCP_install, SPMLD, SPMST, SPMWB_read,
               SPMWB_store, SPM_release}) {
     z0_stallAndWaitL0Queue;
   }
 
   transition({IS, IM, IS_I, M_I, SM, SINK_WB_ACK, S_IL0, M_IL0, E_IL0,
               MM_IL0, I_F, V_F, D_F, IX_D, SX_L0, MX_L0, EX_L0,
-              SX_A, MX_A, EX_A, XWB},
+              SX_A, MX_A, EX_A, IX_A, XWB, XC},
              {SPMLD_direct, SPMST_direct, SPMWB_read_direct}) {
     z0_spmStallAndWaitL0Queue;
   }
 
+  // Routing/completion does not consult private cache residency. In particular,
+  // a copy's coherent source may have been refetched before its remote ACK.
+  transition({SM_IL0, L3_SEND, L3_WB_READ, L3_WB_SEND, I, S, SS, E, EE, M, MM, X, IS, IM, IS_I, M_I, SM, SINK_WB_ACK, S_IL0, M_IL0, E_IL0, MM_IL0, I_F, V_F, D_F, IX_D, SX_L0, MX_L0, EX_L0, SX_A, MX_A, EX_A, IX_A, XWB, XC, XP, XM}, L3Forward) {
+    l3_forward;
+    k_popL0RequestQueue;
+  }
+  transition({SM_IL0, L3_SEND, L3_WB_READ, L3_WB_SEND, I, S, SS, E, EE, M, MM, X, IS, IM, IS_I, M_I, SM, SINK_WB_ACK, S_IL0, M_IL0, E_IL0, MM_IL0, I_F, V_F, D_F, IX_D, SX_L0, MX_L0, EX_L0, SX_A, MX_A, EX_A, IX_A, XWB, XC, XP, XM}, L3ForwardDirect) {
+    l3_forwardDirect;
+    k_spmPopL0RequestQueue;
+  }
+  transition({SM_IL0, L3_SEND, L3_WB_READ, L3_WB_SEND, I, S, SS, E, EE, M, MM, X, IS, IM, IS_I, M_I, SM, SINK_WB_ACK, S_IL0, M_IL0, E_IL0, MM_IL0, I_F, V_F, D_F, IX_D, SX_L0, MX_L0, EX_L0, SX_A, MX_A, EX_A, IX_A, XWB, XC, XP, XM}, L3Reply) {
+    l3_reply;
+    o_popL2ResponseQueue;
+  }
+  transition(I, L3ForwardWB, L3_WB_READ) {
+    spm_allocateTBE; l3_forward; k_popL0RequestQueue;
+  }
+  transition(L3_WB_READ, L3WritebackData, L3_WB_SEND) {
+    spm_bufferResponseData; l3_schedule; o_popL2ResponseQueue;
+  }
+  transition(L3_WB_SEND, L3Send, I) {
+    l3_writeback; s_deallocateTBE; kd_wakeUpDependents;
+  }
+
+  transition(IX_D, L3SourceData, L3_SEND) {
+    spm_bufferResponseData; l3_schedule; o_popL2ResponseQueue;
+  }
+  transition(IX_A, L3SourceAck, L3_SEND) {
+    l3_schedule; o_popL2ResponseQueue;
+  }
+  transition({SX_A, MX_A, EX_A}, L3SourceAck, L3_SEND) {
+    spm_bufferCacheData; l3_schedule; ff_deallocateCacheBlock; o_popL2ResponseQueue;
+  }
+  transition(L3_SEND, L3Send, I) {
+    l3_sendInstall; s_deallocateTBE; kd_wakeUpDependents;
+  }
+  transition(L3_SEND, {Load, Store, L1_Replacement, Flush, External_Flush_Data, Flush_NP,
+             SPMCP_snapshot, SPMCP_fetch, SPMCP_install, SPMLD, SPMST, SPMWB_read, SPMWB_store, SPM_release}) {
+    z0_stallAndWaitL0Queue;
+  }
+  transition(L3_SEND, {SPMLD_direct, SPMST_direct, SPMWB_read_direct}) {
+    z0_spmStallAndWaitL0Queue;
+  }
+  transition(L3_SEND, {Inv, Fwd_GETS, Fwd_GETX, Fwd_GETS_Silent}) {
+    z2_stallAndWaitL2Queue;
+  }
+
+  // The source snapshot was captured at L0 before any later coherent eviction.
+  // Install from the existing TBE so lazy slot migration cannot alias the source.
+  transition({I, S, E, M, SS, EE, MM}, SPMCP_snapshot) {
+    spm_allocateTBE;
+    spm_sendMulticastPending;
+    spm_bufferL0Snapshot;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
+    spm_ackToL0;
+    s_deallocateTBE;
+    k_popL0RequestQueue;
+  }
+
   transition(I, SPMCP_fetch, IX_D) {
     spm_allocateTBE;
+    micro_miss;
+    spm_sendMulticastPending;
     spm_issueGETSSilent;
     k_popL0RequestQueue;
   }
 
-  // SPMCP is a coherent-source snapshot operation.  If this L1 state says the
-  // line may also be present in the private L0, recall L0 before installing the
-  // SPM slot so the snapshot observes the issuing core's freshest private
-  // value.  Copying directly from L1 here is unsafe after local writes have not
-  // yet been reflected into the L1 DataBlk.
+  // L0 hits carry snapshots above. If an earlier eviction raced the request,
+  // retain the existing recall fallback, but never release ownership to LLC.
   transition(S, SPMCP_fetch, SX_L0) {
     spm_allocateTBE;
+    spm_sendMulticastPending;
     forward_eviction_to_L0_own;
     k_popL0RequestQueue;
   }
 
-  transition(SS, SPMCP_fetch, SS) {
+  transition(SS, SPMCP_fetch) {
     spm_allocateTBE;
-    spm_installFromCache;
+    spm_sendMulticastPending;
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
     spm_ackToL0;
     s_deallocateTBE;
     k_popL0RequestQueue;
@@ -1502,13 +2343,17 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
   transition(E, SPMCP_fetch, EX_L0) {
     spm_allocateTBE;
+    spm_sendMulticastPending;
     forward_eviction_to_L0_own;
     k_popL0RequestQueue;
   }
 
-  transition(EE, SPMCP_fetch, EE) {
+  transition(EE, SPMCP_fetch) {
     spm_allocateTBE;
-    spm_installFromCache;
+    spm_sendMulticastPending;
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
     spm_ackToL0;
     s_deallocateTBE;
     k_popL0RequestQueue;
@@ -1516,29 +2361,73 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
   transition(M, SPMCP_fetch, MX_L0) {
     spm_allocateTBE;
+    spm_sendMulticastPending;
     forward_eviction_to_L0_own;
     k_popL0RequestQueue;
   }
 
-  transition(MM, SPMCP_fetch, MM) {
+  transition(MM, SPMCP_fetch) {
     spm_allocateTBE;
-    spm_installFromCache;
+    spm_sendMulticastPending;
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
     spm_ackToL0;
     s_deallocateTBE;
     k_popL0RequestQueue;
   }
 
   transition(SX_L0, L0_Ack, SS) {
-    spm_installFromCache;
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
     spm_ackToL0;
     s_deallocateTBE;
     k_popL0RequestQueue;
     kd_wakeUpDependents;
   }
 
+  transition(SX_L0, L0_AckEscape, SS) {
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
+    spm_ackToL0;
+    s_deallocateTBE; k_popL0ReturnQueue; kd_wakeUpDependents;
+  }
+  transition(SX_L0, L0_DataAckEscape, SS) {
+    u_writeDataFromEscape; spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
+    spm_ackToL0;
+    s_deallocateTBE; k_popL0ReturnQueue; kd_wakeUpDependents;
+  }
+  transition(EX_L0, L0_AckEscape, EE) {
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
+    spm_ackToL0;
+    s_deallocateTBE; k_popL0ReturnQueue; kd_wakeUpDependents;
+  }
+  transition({EX_L0, MX_L0}, L0_DataAckEscape, MM) {
+    u_writeDataFromEscape; spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
+    spm_ackToL0;
+    s_deallocateTBE; k_popL0ReturnQueue; kd_wakeUpDependents;
+  }
+  transition(MX_L0, L0_AckEscape, MM) {
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
+    spm_ackToL0;
+    s_deallocateTBE; k_popL0ReturnQueue; kd_wakeUpDependents;
+  }
+
   transition(SX_L0, {L0_DataAck, L0_DataCopy}, SS) {
     u_writeDataFromL0Response;
-    spm_installFromCache;
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
     spm_ackToL0;
     s_deallocateTBE;
     k_popL0RequestQueue;
@@ -1546,7 +2435,9 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   transition(EX_L0, L0_Ack, EE) {
-    spm_installFromCache;
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
     spm_ackToL0;
     s_deallocateTBE;
     k_popL0RequestQueue;
@@ -1559,7 +2450,9 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   // "don't send data").  MM answers Inv with data, so the store survives.
   transition(EX_L0, {L0_DataAck, L0_DataCopy}, MM) {
     u_writeDataFromL0Response;
-    spm_installFromCache;
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
     spm_ackToL0;
     s_deallocateTBE;
     k_popL0RequestQueue;
@@ -1577,11 +2470,16 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     k_popL0RequestQueue;
   }
 
-  // After the L0 recall, the freshest data has settled into this L1 and can be
-  // copied into the SPM slot without releasing the coherent source line.
+  transition({EX_L0, MX_L0}, WriteBackEscape, MX_L0) {
+    u_writeDataFromEscape;
+    k_popL0ReturnQueue;
+  }
+
   transition(MX_L0, {L0_DataAck, L0_DataCopy}, MM) {
     u_writeDataFromL0Response;
-    spm_installFromCache;
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
     spm_ackToL0;
     s_deallocateTBE;
     k_popL0RequestQueue;
@@ -1589,7 +2487,9 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   transition(MX_L0, L0_Ack, MM) {
-    spm_installFromCache;
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
     spm_ackToL0;
     s_deallocateTBE;
     k_popL0RequestQueue;
@@ -1597,7 +2497,9 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   transition(MX_L0, L0_DataNak, MM) {
-    spm_installFromCache;
+    spm_bufferCacheData;
+    spm_installFromTBE;
+    spm_sendRetainedMulticast;
     spm_ackToL0;
     s_deallocateTBE;
     k_popL0RequestQueue;
@@ -1613,12 +2515,110 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     kd_wakeUpDependents;
   }
 
+  transition(IX_D, SPM_McastSourceData, I) {
+    spm_bufferResponseData;
+    spm_installFromTBE;
+    spm_sendMulticastFromTBE;
+    spm_ackToL0;
+    s_deallocateTBE;
+    o_popL2ResponseQueue;
+    kd_wakeUpDependents;
+  }
+
+  transition(IX_A, Put_Ack, I) {
+    spm_installFromTBE;
+    spm_ackToL0;
+    s_deallocateTBE;
+    o_popL2ResponseQueue;
+    kd_wakeUpDependents;
+  }
+
+  transition(IX_A, SPM_McastPutAck, I) {
+    spm_installFromTBE;
+    spm_sendMulticastFromTBE;
+    spm_ackToL0;
+    s_deallocateTBE;
+    o_popL2ResponseQueue;
+    kd_wakeUpDependents;
+  }
+
   transition({SX_A, MX_A, EX_A}, Put_Ack, X) {
     spm_installFromCache;
     spm_ackToL0;
     s_deallocateTBE;
     o_popL2ResponseQueue;
     ff_deallocateCacheBlock;
+    kd_wakeUpDependents;
+  }
+
+  transition({SX_A, MX_A, EX_A}, SPM_McastPutAck, I) {
+    spm_bufferCacheData;
+    spm_installFromCache;
+    spm_sendMulticastFromTBE;
+    spm_ackToL0;
+    s_deallocateTBE;
+    o_popL2ResponseQueue;
+    ff_deallocateCacheBlock;
+    kd_wakeUpDependents;
+  }
+
+  transition({I, X, XP}, SPM_McastData, X) {
+    spm_installMulticastData;
+    o_popL2ResponseQueue;
+    kd_wakeUpDependents;
+  }
+
+  transition({I, X}, SPM_McastPending, XP) {
+    spm_installMulticastPending;
+    o_popL2ResponseQueue;
+  }
+
+  transition(XP, SPM_McastPending, XP) {
+    o_popL2ResponseQueue;
+  }
+
+  transition({I, X}, SPM_McastClaim, X) {
+    spm_installMulticastClaim;
+    spm_sendMulticastClaimAck;
+    o_popL2ResponseQueue;
+  }
+
+  transition({IS, IM, IS_I, M_I, SM, SINK_WB_ACK, S_IL0, M_IL0, E_IL0,
+              MM_IL0, I_F, V_F, D_F, IX_D, SX_L0, MX_L0, EX_L0,
+              SX_A, MX_A, EX_A, IX_A, XWB, XC}, SPM_McastClaimWait) {
+    z3_stallAndWaitResponseQueue;
+  }
+
+  transition({I, S, SS, E, EE, M, MM, X}, SPM_McastClaimLocal, XC) {
+    spm_allocateTBE;
+    spm_claimSlot;
+    spm_sendMulticastClaim;
+    k_popL0RequestQueue;
+  }
+
+  transition(XC, SPM_McastClaimAck) {
+    spm_decrementMulticastAck;
+    o_popL2ResponseQueue;
+  }
+
+  transition(XC, SPM_McastClaimLastAck, X) {
+    spm_decrementMulticastAck;
+    spm_claimAckToL0;
+    s_deallocateTBE;
+    o_popL2ResponseQueue;
+    kd_wakeUpDependents;
+  }
+
+  transition(XM, SPM_McastAck) {
+    spm_decrementMulticastAck;
+    o_popL2ResponseQueue;
+  }
+
+  transition(XM, SPM_McastLastAck, I) {
+    spm_decrementMulticastAck;
+    spm_ackToL0;
+    s_deallocateTBE;
+    o_popL2ResponseQueue;
     kd_wakeUpDependents;
   }
 
@@ -1703,9 +2703,22 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     z2_stallAndWaitL2Queue;
   }
 
+  transition(XP, {SPMLD, SPMST, SPMWB_read, SPMWB_store, SPM_release}) {
+    z0_stallAndWaitL0Queue;
+  }
+
+  transition(XP, {SPMLD_direct, SPMST_direct, SPMWB_read_direct}) {
+    z0_spmStallAndWaitL0Queue;
+  }
+
+  transition(XP, {L1_Replacement, Inv, Fwd_GETX, Fwd_GETS}) {
+    z2_stallAndWaitL2Queue;
+  }
+
   transition(I, Load, IS) {
     oo_allocateCacheBlock;
     i_allocateTBE;
+    micro_miss;
     a_issueGETS;
     uu_profileMiss;
     k_popL0RequestQueue;
@@ -1714,6 +2727,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   transition(I, Store, IM) {
     oo_allocateCacheBlock;
     i_allocateTBE;
+    micro_miss;
     b_issueGETX;
     uu_profileMiss;
     k_popL0RequestQueue;
@@ -1733,6 +2747,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
   transition({S,SS}, Store, SM) {
     i_allocateTBE;
+    micro_miss;
     c_issueUPGRADE;
     uu_profileMiss;
     k_popL0RequestQueue;
@@ -1767,6 +2782,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   transition(EE, L1_Replacement, M_I) {
     // silent E replacement??
     i_allocateTBE;
+    micro_write;
     g_issuePUTX;   // send data, but hold in case forwarded request
     ff_deallocateCacheBlock;
   }
@@ -1801,6 +2817,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   // Transitions from Modified
   transition(MM, L1_Replacement, M_I) {
     i_allocateTBE;
+    micro_write;
     g_issuePUTX;   // send data, but hold in case forwarded request
     ff_deallocateCacheBlock;
   }
@@ -1808,6 +2825,11 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   transition({M,E}, WriteBack, MM) {
     u_writeDataFromL0Request;
     k_popL0RequestQueue;
+  }
+
+  transition({M,E}, WriteBackEscape, MM) {
+    u_writeDataFromEscape;
+    k_popL0ReturnQueue;
   }
 
   transition(M_I, WB_Ack, I) {
@@ -1967,10 +2989,32 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     kd_wakeUpDependents;
   }
 
+  transition({M_IL0, E_IL0}, WriteBackEscape, MM_IL0) {
+    u_writeDataFromEscape;
+    k_popL0ReturnQueue;
+    kd_wakeUpDependents;
+  }
+
   transition({M_IL0, E_IL0}, L0_DataAck, MM) {
     u_writeDataFromL0Response;
     k_popL0RequestQueue;
     kd_wakeUpDependents;
+  }
+
+  transition({M_IL0, E_IL0}, L0_DataAckEscape, MM) {
+    u_writeDataFromEscape; k_popL0ReturnQueue; kd_wakeUpDependents;
+  }
+  transition({M_IL0, MM_IL0}, L0_AckEscape, MM) {
+    k_popL0ReturnQueue; kd_wakeUpDependents;
+  }
+  transition(E_IL0, L0_AckEscape, EE) {
+    k_popL0ReturnQueue; kd_wakeUpDependents;
+  }
+  transition(S_IL0, L0_AckEscape, SS) {
+    k_popL0ReturnQueue; kd_wakeUpDependents;
+  }
+  transition(SM_IL0, L0_AckEscape, IM) {
+    k_popL0ReturnQueue; kd_wakeUpDependents;
   }
 
   transition({M_IL0, MM_IL0}, L0_Ack, MM) {

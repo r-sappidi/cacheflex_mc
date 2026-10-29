@@ -42,6 +42,7 @@
 #define __CPU_O3_COMMIT_HH__
 
 #include <queue>
+#include <unordered_set>
 
 #include "base/statistics.hh"
 #include "cpu/exetrace.hh"
@@ -109,7 +110,6 @@ class Commit
         TrapPending,
         FetchTrapPending,
         SquashAfterPending, //< Committing instructions before a squash.
-        ThreadStatusMax
     };
 
   private:
@@ -205,6 +205,8 @@ class Commit
 
     /** Ticks the commit stage, which tries to commit instructions. */
     void tick();
+    void profileIdleStart(bool suspended);
+    void profileIdleEnd();
 
     /** Handles any squashes that are sent from IEW, and adds instructions
      * to the ROB and tries to commit instructions.
@@ -462,18 +464,47 @@ class Commit
     int htmStarts[MaxThreads];
     int htmStops[MaxThreads];
 
+    // Per-cycle progress flags for the mutually exclusive CacheFlex kernel
+    // classifier. They are reset at the start of every commit tick.
+    bool kernelCommittedAny = false;
+    bool kernelCommittedCompute = false;
+    bool kernelCommittedSpmLoad = false;
+    bool kernelCommittedCacheLoad = false;
+    bool kernelCommittedCacheBLoad = false;
+    bool kernelCommittedStore = false;
+    bool kernelWindowActiveThisCycle = false;
+    Addr kernelStartPc = 0;
+    bool pcProfile = false;
+    std::unordered_set<Addr> boundaryPcs;
+    bool pcSleeping = false;
+    bool pcSleepSuspended = false;
+    bool pcSleepHasHead = false;
+    Addr pcSleepHead = 0;
+    uint64_t pcSleepCursor = 0;
+    void profileAccountSleep();
+    bool pcRetiredThisCycle = false;
+    Addr kernelEndPc = 0;
+    Addr kernelBLoadStartPc = 0;
+    Addr kernelBLoadEndPc = 0;
+
+    void classifyCacheFlexKernelCycle();
+
     struct CommitStats : public statistics::Group
     {
-        static std::string statusStrings[ThreadStatusMax];
-        static std::string statusDefinitions[ThreadStatusMax];
-
+        statistics::SparseHistogram pcHeadCycles;
+        statistics::SparseHistogram pcSleepHeadCycles;
+        statistics::Scalar pcSleepEmptyCycles;
+        statistics::Scalar pcSuspendedCycles;
+        statistics::Scalar pcSleepCycles;
+        statistics::SparseHistogram pcNoRetireCycles;
+        statistics::SparseHistogram pcNotExecutedCycles;
+        statistics::SparseHistogram pcRetiredMicroops;
+        statistics::Scalar pcEmptyRobCycles;
+        statistics::Scalar pcObservedCycles;
         CommitStats(CPU *cpu, Commit *commit);
         /** Stat for the total number of squashed instructions discarded by
          * commit.
          */
-        /** Stat for total number of cycles spent in each commit state */
-        statistics::Vector status;
-
         statistics::Scalar commitSquashedInsts;
         /** Stat for the total number of times commit has had to stall due
          * to a non-speculative instruction reaching the head of the ROB.
@@ -490,11 +521,23 @@ class Commit
         statistics::Vector amos;
         /** Total number of committed memory barriers. */
         statistics::Vector membars;
+        /** Total number of function calls */
+        statistics::Vector functionCalls;
         /** Committed instructions by instruction type (OpClass) */
         statistics::Vector2d committedInstType;
 
         /** Number of cycles where the commit bandwidth limit is reached. */
         statistics::Scalar commitEligibleSamples;
+
+        statistics::Scalar kernelProfileCycles;
+        statistics::Scalar kernelComputeCycles;
+        statistics::Scalar kernelSpmDataCycles;
+        statistics::Scalar kernelCacheDataCycles;
+        statistics::Scalar kernelCacheBDataCycles;
+        statistics::Scalar kernelStoreCycles;
+        statistics::Scalar kernelFrontendControlCycles;
+        statistics::Scalar kernelOtherBackendCycles;
+        statistics::Formula kernelClassifiedCycles;
     } stats;
 };
 

@@ -166,6 +166,16 @@ uint32_t
 Network::MessageSizeType_to_int(MessageSizeType size_type)
 {
     switch(size_type) {
+      case MessageSizeType_SPM_Data128:
+        return m_control_msg_size + 128;
+      case MessageSizeType_SPM_Data256:
+        return m_control_msg_size + 256;
+      case MessageSizeType_SPM_Reduce256:
+        return m_control_msg_size + 264;
+      case MessageSizeType_SPM_Reduce128:
+        return m_control_msg_size + 136;
+      case MessageSizeType_SPM_FinalizeControl:
+        return m_control_msg_size + 8;
       case MessageSizeType_Control:
       case MessageSizeType_Request_Control:
       case MessageSizeType_Reissue_Control:

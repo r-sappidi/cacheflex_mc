@@ -32,3 +32,4 @@ class BaseO3Checker(CheckerCPU):
     type = "BaseO3Checker"
     cxx_class = "gem5::o3::Checker"
     cxx_header = "cpu/o3/checker.hh"
+

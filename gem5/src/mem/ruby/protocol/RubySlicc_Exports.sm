@@ -300,6 +300,11 @@ enumeration(MachineType, desc="...", default="MachineType_NULL") {
 enumeration(MessageSizeType, desc="...") {
   Control,    desc="Control Message";
   Data,       desc="Data Message";
+  SPM_Data128, desc="Shared SPM 128 byte vector payload plus normal header";
+  SPM_Data256, desc="Shared SPM 256 byte vector payload plus normal header";
+  SPM_Reduce256, desc="Shared reduction 256 byte payload plus scalar/header extension";
+  SPM_Reduce128, desc="Shared FP16 reduction 128 byte payload plus scalar/header extension";
+  SPM_FinalizeControl, desc="Finalization control plus FP32 scale/header extension";
   Request_Control, desc="Request";
   Reissue_Control, desc="Reissued request";
   Response_Data, desc="data response";

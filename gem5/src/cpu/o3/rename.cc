@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2012, 2014-2019, 2025 Arm Limited
+ * Copyright (c) 2010-2012, 2014-2019 ARM Limited
  * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved.
  *
@@ -48,6 +48,7 @@
 #include "cpu/o3/limits.hh"
 #include "cpu/reg_class.hh"
 #include "debug/Activity.hh"
+#include "debug/O3PipeView.hh"
 #include "debug/Rename.hh"
 #include "params/BaseO3CPU.hh"
 
@@ -56,28 +57,6 @@ namespace gem5
 
 namespace o3
 {
-
-// clang-format off
-std::string Rename::RenameStats::statusStrings[ThreadStatusMax] = {
-    "Running",
-    "Idle",
-    "StartSquash",
-    "Squashing",
-    "Blocked",
-    "Unblocking",
-    "SerializeStall",
-};
-
-std::string Rename::RenameStats::statusDefinitions[ThreadStatusMax] = {
-    "Number of cycles rename is running",
-    "Number of cycles rename is idle",
-    "Not Used",
-    "Number of cycles rename is squashing",
-    "Number of cycles rename is blocking",
-    "Number of cycles rename is unblocking",
-    "Number of cycles rename stalled for serializing inst",
-};
-// clang-format on
 
 Rename::Rename(CPU *_cpu, const BaseO3CPUParams &params)
     : cpu(_cpu),
@@ -117,8 +96,18 @@ Rename::name() const
 
 Rename::RenameStats::RenameStats(statistics::Group *parent)
     : statistics::Group(parent, "rename"),
-      ADD_STAT(status, statistics::units::Cycle::get(),
-               "Number of cycles spent in each rename state"),
+      ADD_STAT(squashCycles, statistics::units::Cycle::get(),
+               "Number of cycles rename is squashing"),
+      ADD_STAT(idleCycles, statistics::units::Cycle::get(),
+               "Number of cycles rename is idle"),
+      ADD_STAT(blockCycles, statistics::units::Cycle::get(),
+               "Number of cycles rename is blocking"),
+      ADD_STAT(serializeStallCycles, statistics::units::Cycle::get(),
+               "count of cycles rename stalled for serializing inst"),
+      ADD_STAT(runCycles, statistics::units::Cycle::get(),
+               "Number of cycles rename is running"),
+      ADD_STAT(unblockCycles, statistics::units::Cycle::get(),
+               "Number of cycles rename is unblocking"),
       ADD_STAT(renamedInsts, statistics::units::Count::get(),
                "Number of instructions processed by rename"),
       ADD_STAT(squashedInsts, statistics::units::Count::get(),
@@ -128,7 +117,7 @@ Rename::RenameStats::RenameStats(statistics::Group *parent)
       ADD_STAT(IQFullEvents, statistics::units::Count::get(),
                "Number of times rename has blocked due to IQ full"),
       ADD_STAT(LQFullEvents, statistics::units::Count::get(),
-               "Number of times rename has blocked due to LQ full"),
+               "Number of times rename has blocked due to LQ full" ),
       ADD_STAT(SQFullEvents, statistics::units::Count::get(),
                "Number of times rename has blocked due to SQ full"),
       ADD_STAT(fullRegistersEvents, statistics::units::Count::get(),
@@ -156,18 +145,14 @@ Rename::RenameStats::RenameStats(statistics::Group *parent)
       ADD_STAT(tempSerializing, statistics::units::Count::get(),
                "count of temporary serializing insts renamed"),
       ADD_STAT(skidInsts, statistics::units::Count::get(),
-               "count of insts added to the skid buffer"),
-      ADD_STAT(intReturned, statistics::units::Count::get(),
-               "count of registers freed and written back to integer free list"),
-      ADD_STAT(fpReturned, statistics::units::Count::get(),
-               "count of registers freed and written back to floating point free list")
-
+               "count of insts added to the skid buffer")
 {
-    status.init(ThreadStatusMax).flags(statistics::pdf | statistics::nozero);
-    for (int i = 0; i < ThreadStatusMax; ++i) {
-        status.subname(i, statusStrings[i]);
-        status.subdesc(i, statusDefinitions[i]);
-    }
+    squashCycles.prereq(squashCycles);
+    idleCycles.prereq(idleCycles);
+    blockCycles.prereq(blockCycles);
+    serializeStallCycles.flags(statistics::total);
+    runCycles.prereq(idleCycles);
+    unblockCycles.prereq(unblockCycles);
 
     renamedInsts.prereq(renamedInsts);
     squashedInsts.prereq(squashedInsts);
@@ -191,9 +176,6 @@ Rename::RenameStats::RenameStats(statistics::Group *parent)
     serializing.flags(statistics::total);
     tempSerializing.flags(statistics::total);
     skidInsts.flags(statistics::total);
-
-    intReturned.prereq(intReturned);
-    fpReturned.prereq(fpReturned);
 }
 
 void
@@ -263,22 +245,6 @@ Rename::clearStates(ThreadID tid)
     storesInProgress[tid] = 0;
 
     serializeOnNextInst[tid] = false;
-
-    // Clear out any of this thread's instructions being sent to IEW.
-    for (int i = -cpu->renameQueue.getPast();
-         i <= cpu->renameQueue.getFuture(); ++i) {
-        RenameStruct& rename_struct = cpu->renameQueue[i];
-        removeCommThreadInsts(tid, rename_struct);
-    }
-
-    // Clear out any of this thread's instructions being sent to decode.
-    for (int i = -cpu->timeBuffer.getPast();
-         i <= cpu->timeBuffer.getFuture(); ++i) {
-        TimeStruct& time_struct = cpu->timeBuffer[i];
-        time_struct.renameInfo[tid] = {};
-        time_struct.renameBlock[tid] = false;
-        time_struct.renameUnblock[tid] = false;
-    }
 }
 
 void
@@ -435,8 +401,13 @@ Rename::tick()
 
     sortInsts();
 
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
+
     // Check stall and squash signals.
-    for (ThreadID tid : *activeThreads) {
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         DPRINTF(Rename, "Processing [tid:%i]\n", tid);
 
         status_change = checkSignalsAndUpdate(tid) || status_change;
@@ -453,7 +424,11 @@ Rename::tick()
         cpu->activityThisCycle();
     }
 
-    for (ThreadID tid : *activeThreads) {
+    threads = activeThreads->begin();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         // If we committed this cycle then doneSeqNum will be > 0
         if (fromCommit->commitInfo[tid].doneSeqNum != 0 &&
             !fromCommit->commitInfo[tid].squash &&
@@ -487,11 +462,11 @@ Rename::rename(bool &status_change, ThreadID tid)
     //     check if stall conditions have passed
 
     if (renameStatus[tid] == Blocked) {
-        ++stats.status[Blocked];
+        ++stats.blockCycles;
     } else if (renameStatus[tid] == Squashing) {
-        ++stats.status[Squashing];
+        ++stats.squashCycles;
     } else if (renameStatus[tid] == SerializeStall) {
-        ++stats.status[SerializeStall];
+        ++stats.serializeStallCycles;
         // If we are currently in SerializeStall and resumeSerialize
         // was set, then that means that we are resuming serializing
         // this cycle.  Tell the previous stages to block.
@@ -545,12 +520,12 @@ Rename::renameInsts(ThreadID tid)
         DPRINTF(Rename, "[tid:%i] Nothing to do, breaking out early.\n",
                 tid);
         // Should I change status to idle?
-        ++stats.status[Idle];
+        ++stats.idleCycles;
         return;
     } else if (renameStatus[tid] == Unblocking) {
-        ++stats.status[Unblocking];
+        ++stats.unblockCycles;
     } else if (renameStatus[tid] == Running) {
-        ++stats.status[Running];
+        ++stats.runCycles;
     }
 
     // Will have to do a different calculation for the number of free
@@ -695,12 +670,6 @@ Rename::renameInsts(ThreadID tid)
             break;
         }
 
-        // If we detect a WaW conflict for MiscRegs, we tag
-        // the instruction as SerializeBefore to avoid the conflict
-        if (!inst->isSerializeAfter() && inst->numDestRegs(MiscRegClass)) {
-            handleMiscRegWaW(inst, tid);
-        }
-
         // Handle serializeAfter/serializeBefore instructions.
         // serializeAfter marks the next instruction as serializeBefore.
         // serializeBefore makes the instruction wait in rename until the ROB
@@ -755,8 +724,6 @@ Rename::renameInsts(ThreadID tid)
         // Notify potential listeners that source and destination registers for
         // this instruction have been renamed.
         ppRename->notify(inst);
-
-        inst->renameEndTick = curTick() - inst->fetchTick;
 
         // Put instruction in rename queue.
         toIEW->insts[toIEWIndex] = inst;
@@ -829,14 +796,23 @@ Rename::sortInsts()
     for (int i = 0; i < insts_from_decode; ++i) {
         const DynInstPtr &inst = fromDecode->insts[i];
         insts[inst->threadNumber].push_back(inst);
-        inst->renameTick = curTick() - inst->fetchTick;
+#if TRACING_ON
+        if (debug::O3PipeView) {
+            inst->renameTick = curTick() - inst->fetchTick;
+        }
+#endif
     }
 }
 
 bool
 Rename::skidsEmpty()
 {
-    for (ThreadID tid : *activeThreads) {
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         if (!skidBuffer[tid].empty())
             return false;
     }
@@ -849,7 +825,12 @@ Rename::updateStatus()
 {
     bool any_unblocking = false;
 
-    for (ThreadID tid : *activeThreads) {
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         if (renameStatus[tid] == Unblocking) {
             any_unblocking = true;
             break;
@@ -966,15 +947,6 @@ Rename::doSquash(const InstSeqNum &squashed_seq_num, ThreadID tid)
             freeingInProgress[tid].push_back(hb_it->newPhysReg);
         }
 
-        // mark the speculative register as ready in the scoreboard as
-        // the producing instruction is being squashed.
-        // This is not necessary for renameable register as the physical
-        // register is unreachable until it gets recycled as a new destination
-        // register (it will be marked as busy anyway next time it gets used).
-        // This is instead required for fixed mapping registers which could
-        // be rereferenced as a source registers after the squash
-        scoreboard->setReg(hb_it->newPhysReg);
-
         // Notify potential listeners that the register mapping needs to be
         // removed because the instruction it was mapped to got squashed. Note
         // that this is done before hb_it is incremented.
@@ -1029,13 +1001,6 @@ Rename::removeFromHistory(InstSeqNum inst_seq_num, ThreadID tid)
         if (hb_it->newPhysReg != hb_it->prevPhysReg) {
             freeList->addReg(hb_it->prevPhysReg);
         }
-        if (hb_it->prevPhysReg->classValue()== FloatRegClass) {
-           ++stats.fpReturned;
-        }
-        if (hb_it->prevPhysReg->classValue()== IntRegClass) {
-           ++stats.intReturned;
-        }
-
 
         ++stats.committedMaps;
 
@@ -1167,38 +1132,6 @@ Rename::renameDestRegs(const DynInstPtr &inst, ThreadID tid)
                             rename_result.second);
 
         ++stats.renamedOperands;
-    }
-}
-
-void
-Rename::handleMiscRegWaW(DynInstPtr &inst, ThreadID tid)
-{
-    // If the destination register is already being produced, we mark the
-    // instruction as serialize before, stalling it at rename until
-    // the ROB is empty. This is an expensive way to deal with a WAW
-    // conflict. Even if the instruction is marked as non speculative
-    // and will only execute at commit time, the dependency logic
-    // (called at dispatch time)
-    // is not capable of handling two producers of the same register
-    // at the same time.
-    unsigned num_dest_regs = inst->numDestRegs();
-    for (int dest_idx = 0; dest_idx < num_dest_regs; dest_idx++) {
-
-        gem5::ThreadContext *tc = inst->tcBase();
-        UnifiedRenameMap *map = renameMap[tid];
-        auto *isa = tc->getIsaPtr();
-
-        const RegId &dest_reg = inst->destRegIdx(dest_idx);
-        const RegId flat_reg = dest_reg.flatten(*isa);
-        PhysRegIdPtr phys_reg = map->lookup(flat_reg);
-
-        if (phys_reg->classValue() == MiscRegClass &&
-            !phys_reg->isAlwaysReady() &&
-            !scoreboard->getReg(map->lookup(flat_reg))) {
-
-            inst->setSerializeBefore();
-            return;
-        }
     }
 }
 

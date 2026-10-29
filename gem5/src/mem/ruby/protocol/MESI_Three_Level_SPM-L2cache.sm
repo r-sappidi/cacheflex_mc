@@ -40,9 +40,34 @@
 
 machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
  : CacheMemory * L2cache;
+   MicroResourcePool * missCredits;
+   MicroResourcePool * writeCredits;
    Cycles l2_request_latency := 2;
    Cycles l2_response_latency := 2;
    Cycles to_l1_latency := 1;
+   // Experimental: acquire coherent LLC ownership on a silent-copy miss.
+   // SPM destinations themselves are never coherent sharers. Default preserves
+   // destructive/no-fill behavior for all existing experiments.
+   bool spm_retain_llc := "False";
+   bool l3_spm_enabled := "False";
+   bool l3_shared_service_port := "False";
+   Cycles l3_spm_latency := 10;
+   bool l3_reduction_enabled := "False";
+   int l3_reduction_entries := 4;
+   Cycles l3_reduction_arithmetic := 9;
+   // Diagnostic overrides: zero preserves the existing shared-SPM latency.
+   // Only reduction reads/completion replies change; SRAM bandwidth, ordinary
+   // accesses, finalization, finite queues and installation ordering do not.
+   Cycles l3_reduction_read_delay := 0;
+   Cycles l3_reduction_reply_delay := 0;
+   bool l3_reduction_pipeline := "False";
+   Cycles l3_reduction_interval := 4;
+   bool l3_reduction_fp16 := "False";
+   Cycles l3_reduction_convert := 6;
+   bool l3_reduction_initialize := "False";
+   bool l3_reduction_finalize := "False";
+   Cycles l3_finalize_arithmetic := 8;
+   MessageBuffer * l3ReductionQueue;
 
   // Message Queues
   // From local bank of L2 cache TO the network
@@ -69,6 +94,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   state_declaration(State, desc="L2 Cache states", default="L2Cache_State_NP") {
     // Base states
     NP, AccessPermission:Invalid, desc="Not present in either cache";
+    X, AccessPermission:Read_Write, desc="Shared scratchpad slot, outside coherence";
     SS, AccessPermission:Read_Only, desc="L2 cache entry Shared, also present in one or more L1s";
     M, AccessPermission:Read_Write, desc="L2 cache entry Modified, not present in any L1s", format="!b";
     MT, AccessPermission:Maybe_Stale, desc="L2 cache entry Modified in a local L1, assume L2 copy stale", format="!b";
@@ -104,6 +130,14 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
 
   // EVENTS
   enumeration(Event, desc="L2 Cache events") {
+    L3Access, desc="Shared SPM access or install";
+    L3ReduceCapture, desc="Capture into finite near-bank contribution queue";
+    L3ReduceStart, desc="Read existing SRAM and compute in bank engine";
+    L3ReduceFinish, desc="Install timed bank reduction result";
+    L3FinalizeCapture, desc="Capture translated coherent finalization request";
+    L3FinalizeFinish, desc="Send normalized FP16 snapshot and release accumulator slots";
+    L3ReduceWait, desc="Shared access conflicts with an in-flight bank update";
+    L3Release, desc="Shared SPM release after software synchronization";
     // L2 events
 
     // events initiated by the local L1s
@@ -118,6 +152,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     SPM_PUTS,                desc="SPM release of shared coherent source";
     SPM_PUTM,                desc="SPM release of modified coherent source";
     SPM_PUTE,                desc="SPM release of exclusive coherent source";
+    SPM_PUT_old,             desc="SPM release from a former sharer; acknowledge without changing current data/owner";
     SPMWB_REQ,               desc="SPM writeback request";
 
     // events initiated by this L2
@@ -126,6 +161,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
 
     // events from memory controller
     Mem_Data,     desc="data from memory", format="!r";
+    Mem_Data_SPM_Retain, desc="SPM fetch data with directory-tracked LLC ownership";
     Mem_Ack,     desc="ack from memory", format="!r";
 
     // M->S data writeback
@@ -173,6 +209,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     Addr DstSPMAddr, default="0", desc="SPM slot address for response routing";
     Addr SrcAddr, default="0", desc="SPM writeback coherent source address (F5 deferred forward)";
     int Len, default="0", desc="SPM writeback length (F5 deferred forward)";
+    bool L3Finalize, default="false", desc="Bank engine entry finalizes two accumulator slots";
   }
 
   structure(TBETable, external="yes") {
@@ -183,6 +220,14 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   }
 
   TBETable TBEs, template="<L2Cache_TBE>", constructor="m_number_of_TBEs";
+  // One shared service port per LLC bank, 64 bytes/cycle. This is an explicit
+  // conservative controller/array bandwidth model, not calibrated RTL timing.
+  TimerTable l3ServicePort;
+  TimerTable l3ReductionTimer;
+  int l3ReductionActive, default="0";
+  TimerTable l3ReductionIssue;
+  Tick l3ReductionAluNext, default="0";
+  int l3ReductionCount, default="0";
 
   Tick clockEdge();
   Tick cyclesToTicks(Cycles c);
@@ -310,10 +355,13 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     } else if (type == CoherenceRequestType:GETS_SILENT) {
       return Event:SPM_GETS_SILENT;
     } else if (type == CoherenceRequestType:PUTS) {
+      if (!isSharer(addr, requestor, cache_entry)) { return Event:SPM_PUT_old; }
       return Event:SPM_PUTS;
     } else if (type == CoherenceRequestType:PUTM) {
+      if (!isSharer(addr, requestor, cache_entry)) { return Event:SPM_PUT_old; }
       return Event:SPM_PUTM;
     } else if (type == CoherenceRequestType:PUTE) {
+      if (!isSharer(addr, requestor, cache_entry)) { return Event:SPM_PUT_old; }
       return Event:SPM_PUTE;
     } else if (type == CoherenceRequestType:SPMWB_REQ) {
       return Event:SPMWB_REQ;
@@ -340,13 +388,70 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
 
   // ** OUT_PORTS **
 
+  void l3Occupy(int bytes) {
+    if (l3_shared_service_port) {
+      assert(!l3ServicePort.isSet(intToAddress(0)));
+      l3ServicePort.set(intToAddress(0), clockEdge() + cyclesToTicks(intToCycles((bytes + 63) / 64)));
+    }
+  }
+
+  void l3ClaimOne(Addr slot) {
+    Entry e := getCacheEntry(slot);
+    if (is_invalid(e)) {
+      e := static_cast(Entry, "pointer", L2cache.allocateSPMSlot(slot,
+        addressToInt(bitSelect(slot, 6, 15)), addressToInt(bitSelect(slot, 16, 18)), new Entry));
+      e.DataBlk.clear();
+      e.CacheState := State:X;
+      e.changePermission(AccessPermission:Read_Write);
+      e.Dirty := false;
+      e.Sharers.clear();
+    }
+    assert(e.isScratchpad());
+    assert(e.CacheState == State:X);
+  }
+
   out_port(L1RequestL2Network_out, RequestMsg, L1RequestFromL2Cache);
   out_port(DirRequestL2Network_out, RequestMsg, DirRequestFromL2Cache);
   out_port(responseL2Network_out, ResponseMsg, responseFromL2Cache);
+  out_port(l3Reduction_out, RequestMsg, l3ReductionQueue);
+
+  // Clear the expired bank reservation before examining internal work.
+  // SLICC visits ports in source order. Otherwise an idle bank with only
+  // queued reductions can consume its last wakeup while still appearing busy.
+  in_port(l3ServicePort_in, Addr, l3ServicePort) {
+    if (l3ServicePort_in.isReady(clockEdge())) {
+      l3ServicePort.unset(intToAddress(0));
+    }
+  }
+
+  in_port(l3ReductionIssue_in, Addr, l3ReductionIssue) {
+    if (l3ReductionIssue_in.isReady(clockEdge())) {
+      l3ReductionIssue.unset(intToAddress(0));
+    }
+  }
+  in_port(l3ReductionTimer_in, Addr, l3ReductionTimer) {
+    if (l3ReductionTimer_in.isReady(clockEdge()) && !l3ServicePort.isSet(intToAddress(0))) {
+      Addr a := l3ReductionTimer.nextAddress();
+      if (TBEs[a].L3Finalize) {
+        trigger(Event:L3FinalizeFinish, a, getCacheEntry(a), TBEs[a]);
+      } else { trigger(Event:L3ReduceFinish, a, getCacheEntry(a), TBEs[a]); }
+    }
+  }
+  in_port(l3Reduction_in, RequestMsg, l3ReductionQueue) {
+    if (l3Reduction_in.isReady(clockEdge()) &&
+        (l3ReductionActive == 0 || l3_reduction_pipeline) &&
+        !l3ReductionIssue.isSet(intToAddress(0)) &&
+        !l3ServicePort.isSet(intToAddress(0))) {
+      peek(l3Reduction_in, RequestMsg) {
+        trigger(Event:L3ReduceStart, in_msg.addr, getCacheEntry(in_msg.addr), TBEs[in_msg.addr]);
+      }
+    }
+  }
+
 
 
   in_port(L1unblockNetwork_in, ResponseMsg, unblockToL2Cache, rank = 2) {
-    if(L1unblockNetwork_in.isReady(clockEdge())) {
+    if(L1unblockNetwork_in.isReady(clockEdge()) && !l3ServicePort.isSet(intToAddress(0))) {
       peek(L1unblockNetwork_in,  ResponseMsg) {
         Entry cache_entry := getCacheEntry(in_msg.addr);
         TBE tbe := TBEs[in_msg.addr];
@@ -368,7 +473,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
 
   // Response  L2 Network - response msg to this particular L2 bank
   in_port(responseL2Network_in, ResponseMsg, responseToL2Cache, rank = 1) {
-    if (responseL2Network_in.isReady(clockEdge())) {
+    if (responseL2Network_in.isReady(clockEdge()) && !l3ServicePort.isSet(intToAddress(0))) {
       peek(responseL2Network_in, ResponseMsg) {
         // test wether it's from a local L1 or an off chip source
         assert(in_msg.Destination.isElement(machineID));
@@ -394,7 +499,11 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
 
         } else { // external message
           if(in_msg.Type == CoherenceResponseType:MEMORY_DATA) {
+            if (spm_retain_llc && getState(tbe, cache_entry, in_msg.addr) == State:SPM_IS) {
+              trigger(Event:Mem_Data_SPM_Retain, in_msg.addr, cache_entry, tbe);
+            } else {
               trigger(Event:Mem_Data, in_msg.addr, cache_entry, tbe);
+            }
           } else if(in_msg.Type == CoherenceResponseType:MEMORY_ACK) {
               trigger(Event:Mem_Ack, in_msg.addr, cache_entry, tbe);
           } else if(in_msg.Type == CoherenceResponseType:INV) {
@@ -411,7 +520,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
 
   // L1 Request
   in_port(L1RequestL2Network_in, RequestMsg, L1RequestToL2Cache, rank = 0) {
-    if(L1RequestL2Network_in.isReady(clockEdge())) {
+    if(L1RequestL2Network_in.isReady(clockEdge()) && !l3ServicePort.isSet(intToAddress(0))) {
       peek(L1RequestL2Network_in,  RequestMsg) {
         Entry cache_entry := getCacheEntry(in_msg.addr);
         TBE tbe := TBEs[in_msg.addr];
@@ -423,7 +532,52 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
         assert(machineIDToMachineType(in_msg.Requestor) == MachineType:L1Cache);
         assert(in_msg.Destination.isElement(machineID));
 
-        if (in_msg.Type == CoherenceRequestType:FLUSH) {
+        if (in_msg.Type == CoherenceRequestType:L3_SPM) {
+          assert(l3_spm_enabled);
+          assert(bitSelect(in_msg.DstSPMAddr, 27, 27) == intToAddress(1));
+          assert(intToID(addressToInt(bitSelect(in_msg.DstSPMAddr, 20, 22))) == version);
+          int footprint := in_msg.Len;
+          if (in_msg.L3Op == 7) { footprint := 256; }
+          Addr conflict := L2cache.l3ReductionConflict(in_msg.DstSPMAddr, footprint);
+          if (conflict != intToAddress(0)) {
+            trigger(Event:L3ReduceWait, conflict, getCacheEntry(conflict), TBEs[conflict]);
+          } else if (in_msg.L3Op == 7) {
+            assert(l3_reduction_enabled);
+            if (bitSelect(in_msg.SrcAddr, 58, 58) == intToAddress(1)) {
+              assert(l3_reduction_fp16 && in_msg.Len == 128);
+            } else { assert(in_msg.Len == 256); }
+            bool initialize := bitSelect(in_msg.SrcAddr, 56, 56) == intToAddress(1);
+            assert(!initialize || l3_reduction_initialize);
+            if (initialize && !L2cache.prepareL3SPM(in_msg.DstSPMAddr, 256)) {
+              // Reuse ordinary eviction/recall, never silently discard cache data.
+              Addr victim := L2cache.l3SPMVictim();
+              Entry v := getCacheEntry(victim);
+              if (isDirty(v)) {
+                trigger(Event:L2_Replacement, victim, v, TBEs[victim]);
+              } else { trigger(Event:L2_Replacement_clean, victim, v, TBEs[victim]); }
+            } else if (l3ReductionCount < l3_reduction_entries) {
+              trigger(Event:L3ReduceCapture, in_msg.addr, cache_entry, tbe);
+            }
+          } else if (in_msg.L3Op == 8) {
+            assert(l3_reduction_finalize && in_msg.Len == 128);
+            if (l3ReductionCount < l3_reduction_entries) {
+              trigger(Event:L3FinalizeCapture, in_msg.addr, cache_entry, tbe);
+            }
+          } else if ((in_msg.L3Op == 2 || in_msg.L3Op == 4 || in_msg.L3Op == 6) &&
+              !L2cache.prepareL3SPM(in_msg.DstSPMAddr, in_msg.Len)) {
+            Addr victim := L2cache.l3SPMVictim();
+            Entry v := getCacheEntry(victim);
+            if (isDirty(v)) {
+              trigger(Event:L2_Replacement, victim, v, TBEs[victim]);
+            } else {
+              trigger(Event:L2_Replacement_clean, victim, v, TBEs[victim]);
+            }
+          } else if (in_msg.L3Op == 3) {
+            trigger(Event:L3Release, in_msg.addr, cache_entry, tbe);
+          } else {
+            trigger(Event:L3Access, in_msg.addr, cache_entry, tbe);
+          }
+        } else if (in_msg.Type == CoherenceRequestType:FLUSH) {
           if (in_msg.Dirty || (is_valid(cache_entry) && cache_entry.Dirty)) {
             trigger(Event:Flush, in_msg.addr, cache_entry, tbe);
           } else {
@@ -471,6 +625,215 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
 
   // ACTIONS
 
+  action(l3_reduceCapture, "l3rc", desc="Finite contribution capture, destination locked until install") {
+    check_allocate(TBEs);
+    peek(L1RequestL2Network_in, RequestMsg) {
+      if (bitSelect(in_msg.SrcAddr, 56, 56) == intToAddress(1)) {
+        l3ClaimOne(address);
+        l3ClaimOne(L2cache.l3SPMSlot(address, 1));
+        l3ClaimOne(L2cache.l3SPMSlot(address, 2));
+        l3ClaimOne(L2cache.l3SPMSlot(address, 3));
+        set_cache_entry(L2cache[address]);
+      }
+    }
+    TBEs.allocate(address); set_tbe(TBEs[address]);
+    L2cache.l3ReductionReserve(address);
+    peek(L1RequestL2Network_in, RequestMsg) {
+      tbe.Requestor := in_msg.Requestor;
+      tbe.SrcAddr := in_msg.L3ReplyAddr;
+      enqueue(l3Reduction_out, RequestMsg, 1) {
+        out_msg := in_msg;
+      }
+    }
+    l3ReductionCount := l3ReductionCount + 1;
+    assert(l3ReductionCount <= l3_reduction_entries);
+  }
+  action(l3_finalizeCapture, "l3fc", desc="Finite finalization entry; same engine and bounded sink") {
+    check_allocate(TBEs);
+    TBEs.allocate(address); set_tbe(TBEs[address]);
+    L2cache.l3ReductionReserve(address, 128);
+    tbe.L3Finalize := true;
+    peek(L1RequestL2Network_in, RequestMsg) {
+      tbe.Requestor := in_msg.Requestor;
+      tbe.SrcAddr := in_msg.L3ReplyAddr;
+      enqueue(l3Reduction_out, RequestMsg, 1) { out_msg := in_msg; }
+    }
+    l3ReductionCount := l3ReductionCount + 1;
+    assert(l3ReductionCount <= l3_reduction_entries);
+  }
+  action(l3_popCommand, "l3pc", desc="Command enters buffer, no accumulator SRAM access yet") {
+    L1RequestL2Network_in.dequeue(clockEdge());
+  }
+
+  action(l3_reduceStart, "l3rs", desc="Serialized bank read and non-fused FP32 scale/add") {
+    assert(l3ReductionActive == 0 || l3_reduction_pipeline);
+    l3ReductionActive := l3ReductionActive + 1;
+    assert(l3ReductionActive <= l3_reduction_entries);
+    L2cache.l3ReductionStart(l3ReductionActive);
+    if (l3_reduction_pipeline) {
+      // One existing 16-lane pipelined engine, not one ALU per command.
+      // Four cycles to launch 64 FP32 elements. SRAM arbitration is separate.
+      l3ReductionIssue.set(intToAddress(0), clockEdge() + cyclesToTicks(l3_reduction_interval));
+    }
+    peek(l3Reduction_in, RequestMsg) {
+      Cycles arithmetic := l3_reduction_arithmetic;
+      Cycles delay := l3_spm_latency;
+      if (in_msg.L3Op == 7 && l3_reduction_read_delay > intToCycles(0)) {
+        delay := l3_reduction_read_delay;
+      }
+      if (in_msg.L3Op == 8) {
+        tbe.DataBlk := L2cache.l3FinalizeResult(address, in_msg.SrcAddr);
+        arithmetic := l3_finalize_arithmetic;
+        l3Occupy(128);
+      } else {
+        tbe.DataBlk := L2cache.l3ReductionResult(address, in_msg.DataBlk, in_msg.SrcAddr);
+        if (bitSelect(in_msg.SrcAddr, 56, 56) == intToAddress(1)) {
+          delay := intToCycles(0); // Initialize from explicit +0, no SRAM read.
+        } else { l3Occupy(256); }
+      }
+      delay := delay + arithmetic;
+      if (in_msg.L3Op == 7 && bitSelect(in_msg.SrcAddr, 58, 58) == intToAddress(1)) {
+        delay := delay + l3_reduction_convert;
+      }
+      Tick done := clockEdge() + cyclesToTicks(delay);
+      if (l3_reduction_pipeline) {
+        // Reserve the SAME ALU for four lane beats, including mixed FP16/FP32
+        // arrivals whose conversion delays otherwise permit an illegal overlap.
+        Tick alu_start := done - cyclesToTicks(arithmetic);
+        if (alu_start < l3ReductionAluNext) { alu_start := l3ReductionAluNext; }
+        l3ReductionAluNext := alu_start + cyclesToTicks(l3_reduction_interval);
+        done := alu_start + cyclesToTicks(arithmetic);
+      }
+      l3ReductionTimer.set(address, done);
+    }
+    l3Reduction_in.dequeue(clockEdge());
+  }
+
+  action(l3_finalizeFinish, "l3ff", desc="Final FP16 payload leaves bank; no CPU accumulator load") {
+    assert(l3ReductionActive > 0 && tbe.L3Finalize);
+    enqueue(responseL2Network_out, ResponseMsg, l3_spm_latency) {
+      out_msg.addr := tbe.SrcAddr;
+      out_msg.DstSPMAddr := address;
+      out_msg.L3Op := 5; // Existing coherent writeback snapshot consumer.
+      out_msg.Len := 64;
+      out_msg.DataBlk := tbe.DataBlk;
+      out_msg.Type := CoherenceResponseType:L3_SPM_REPLY;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(tbe.Requestor);
+      out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+    L2cache.l3ReductionRelease(address, 128);
+    Addr second := L2cache.l3SPMSlot(address, 1);
+    Entry other := getCacheEntry(second);
+    assert(is_valid(other) && other.isScratchpad());
+    L2cache.releaseSPMSlot(second);
+    other.setScratchpad(false);
+    L2cache.deallocate(second);
+    L2cache.releaseSPMSlot(address);
+    cache_entry.setScratchpad(false);
+    L2cache.deallocate(address); unset_cache_entry();
+    // Explicitly charge two bank cycles for slot-metadata reclamation; no
+    // accumulator data write is needed. Final payload remains in finite buffers.
+    l3Occupy(128);
+    l3ReductionTimer.unset(address);
+    l3ReductionActive := l3ReductionActive - 1;
+    L2cache.l3ReductionFinish();
+    l3ReductionCount := l3ReductionCount - 1;
+    TBEs.deallocate(address); unset_tbe();
+    wakeUpBuffers(address);
+    wakeUpBuffers(second);
+  }
+
+  action(l3_reduceFinish, "l3rf", desc="Timed write to the existing SRAM, then final completion ACK") {
+    assert(l3ReductionActive > 0);
+    L2cache.writeSPMData(address, tbe.DataBlk, 256);
+    L2cache.l3ReductionRelease(address);
+    Cycles reply_delay := l3_spm_latency;
+    if (l3_reduction_reply_delay > intToCycles(0)) { reply_delay := l3_reduction_reply_delay; }
+    enqueue(responseL2Network_out, ResponseMsg, reply_delay) {
+      out_msg.addr := tbe.SrcAddr;
+      out_msg.DstSPMAddr := address;
+      out_msg.L3Op := 7;
+      out_msg.Len := 256;
+      out_msg.Type := CoherenceResponseType:L3_SPM_REPLY;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(tbe.Requestor);
+      out_msg.MessageSize := MessageSizeType:Response_Control;
+    }
+    l3Occupy(256);
+    l3ReductionTimer.unset(address);
+    l3ReductionActive := l3ReductionActive - 1;
+    L2cache.l3ReductionFinish();
+    l3ReductionCount := l3ReductionCount - 1;
+    TBEs.deallocate(address); unset_tbe();
+    wakeUpBuffers(address);
+  }
+
+  action(l3_access, "l3a", desc="Read or write existing shared LLC SRAM slots") {
+    peek(L1RequestL2Network_in, RequestMsg) {
+      if (in_msg.L3Op == 2 || in_msg.L3Op == 4 || in_msg.L3Op == 6) {
+        l3ClaimOne(in_msg.DstSPMAddr);
+        if (in_msg.Len > 64) { l3ClaimOne(L2cache.l3SPMSlot(in_msg.DstSPMAddr, 1)); }
+        if (in_msg.Len > 128) { l3ClaimOne(L2cache.l3SPMSlot(in_msg.DstSPMAddr, 2)); }
+        if (in_msg.Len > 192) { l3ClaimOne(L2cache.l3SPMSlot(in_msg.DstSPMAddr, 3)); }
+      }
+      L2cache.validateL3SPM(in_msg.DstSPMAddr, in_msg.Len);
+      if (in_msg.L3Op == 2 || in_msg.L3Op == 4) {
+        if (in_msg.SPMMasked) {
+          L2cache.writeSPMDataMasked(in_msg.DstSPMAddr, in_msg.DataBlk, in_msg.Len, in_msg.SPMWriteMask);
+        } else {
+          L2cache.writeSPMData(in_msg.DstSPMAddr, in_msg.DataBlk, in_msg.Len);
+        }
+      }
+      enqueue(responseL2Network_out, ResponseMsg, l3_spm_latency) {
+        out_msg.addr := in_msg.L3ReplyAddr;
+        out_msg.DstSPMAddr := in_msg.DstSPMAddr;
+        out_msg.SrcAddr := in_msg.SrcAddr;
+        out_msg.L3Op := in_msg.L3Op;
+        out_msg.Len := in_msg.Len;
+        out_msg.Type := CoherenceResponseType:L3_SPM_REPLY;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Response_Control;
+        if (in_msg.L3Op == 1 || in_msg.L3Op == 5) {
+          out_msg.DataBlk := L2cache.readSPMData(in_msg.DstSPMAddr, in_msg.Len);
+          out_msg.MessageSize := MessageSizeType:Response_Data;
+          if (in_msg.Len > 128) { out_msg.MessageSize := MessageSizeType:SPM_Data256; }
+          else if (in_msg.Len > 64) { out_msg.MessageSize := MessageSizeType:SPM_Data128; }
+        }
+      }
+    }
+  }
+
+  action(l3_release, "l3rel", desc="Drop shared slot only after prior accesses complete") {
+    peek(L1RequestL2Network_in, RequestMsg) {
+      assert(is_valid(cache_entry));
+      assert(cache_entry.isScratchpad());
+      L2cache.releaseSPMSlot(address);
+      cache_entry.setScratchpad(false);
+      L2cache.deallocate(address);
+      unset_cache_entry();
+      enqueue(responseL2Network_out, ResponseMsg, l3_spm_latency) {
+        out_msg.addr := in_msg.L3ReplyAddr;
+        out_msg.DstSPMAddr := in_msg.DstSPMAddr;
+        out_msg.L3Op := 3;
+        out_msg.Type := CoherenceResponseType:L3_SPM_REPLY;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Response_Control;
+      }
+    }
+  }
+
+  action(micro_miss, "lmm", desc="MICRO LLC miss") {
+    check_allocate(missCredits);
+    missCredits.allocate(address);
+  }
+  action(micro_write, "lmw", desc="LLC eviction snapshot") {
+    check_allocate(writeCredits);
+    writeCredits.allocate(address);
+  }
+
   action(a_issueFetchToMemory, "a", desc="fetch data from memory") {
     peek(L1RequestL2Network_in, RequestMsg) {
       enqueue(DirRequestL2Network_out, RequestMsg, l2_request_latency) {
@@ -492,7 +855,13 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
         out_msg.SrcAddr := in_msg.SrcAddr;
         out_msg.DstSPMAddr := in_msg.DstSPMAddr;
         out_msg.Len := in_msg.Len;
-        out_msg.Type := CoherenceRequestType:GETS_SILENT;
+        if (spm_retain_llc) {
+          // Ordinary directory fetch records THIS LLC bank as owner. Do not
+          // add the requesting private SPM to cache_entry.Sharers.
+          out_msg.Type := CoherenceRequestType:GETS;
+        } else {
+          out_msg.Type := CoherenceRequestType:GETS_SILENT;
+        }
         out_msg.Requestor := machineID;
         out_msg.Destination.add(mapAddressToMachine(address, MachineType:Directory));
         out_msg.MessageSize := MessageSizeType:Control;
@@ -760,21 +1129,30 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   }
 
   action(s_deallocateTBE, "s", desc="Deallocate external TBE") {
+    missCredits.release(address);
+    writeCredits.release(address);
     TBEs.deallocate(address);
     unset_tbe();
   }
 
   action(jj_popL1RequestQueue, "\j", desc="Pop incoming L1 request queue") {
+    peek(L1RequestL2Network_in, RequestMsg) {
+      if (in_msg.Type == CoherenceRequestType:L3_SPM && in_msg.L3Op != 3) {
+        l3Occupy(in_msg.Len);
+      } else { l3Occupy(64); }
+    }
     Tick delay := L1RequestL2Network_in.dequeue(clockEdge());
     profileMsgDelay(0, ticksToCycles(delay));
   }
 
   action(k_popUnblockQueue, "k", desc="Pop incoming unblock queue") {
+    l3Occupy(64);
     Tick delay := L1unblockNetwork_in.dequeue(clockEdge());
     profileMsgDelay(0, ticksToCycles(delay));
   }
 
   action(o_popIncomingResponseQueue, "o", desc="Pop Incoming Response queue") {
+    l3Occupy(64);
     Tick delay := responseL2Network_in.dequeue(clockEdge());
     profileMsgDelay(1, ticksToCycles(delay));
   }
@@ -1116,6 +1494,15 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   // TRANSITIONS
   //*****************************************************
 
+  transition({NP, X}, L3Access) { l3_access; jj_popL1RequestQueue; }
+  transition({NP, X}, L3ReduceCapture, X) { l3_reduceCapture; l3_popCommand; }
+  transition(X, L3FinalizeCapture) { l3_finalizeCapture; l3_popCommand; }
+  transition(X, L3ReduceStart) { l3_reduceStart; }
+  transition(X, L3ReduceFinish) { l3_reduceFinish; }
+  transition(X, L3FinalizeFinish, NP) { l3_finalizeFinish; }
+  transition(X, L3ReduceWait) { zz_stallAndWaitL1RequestQueue; }
+  transition(X, L3Release, NP) { l3_release; jj_popL1RequestQueue; }
+
 
   //===============================================
   // BASE STATE - I
@@ -1155,6 +1542,19 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   }
 
 
+  // Match ordinary old-owner writeback handling, but return PUT_ACK. Never
+  // overwrite data or clear the new owner using an overtaken SPM snapshot.
+  transition({NP, SS, M, MT}, SPM_PUT_old) {
+    spa_sendPutAck;
+    jj_popL1RequestQueue;
+  }
+
+  transition({M_I, MT_I, MCT_I, I_I, S_I, ISS, IS, IM, SPM_IS,
+              SPM_WB, SPM_WB_INV, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB,
+              I_F, I_FF, MT_F}, SPM_PUT_old) {
+    zz_stallAndWaitL1RequestQueue;
+  }
+
   transition({SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB},
              {L1_GETS, L1_GET_INSTR, L1_GETX, L1_UPGRADE,
               SPM_GETS_SILENT, SPM_PUTS, SPM_PUTM, SPM_PUTE,
@@ -1171,6 +1571,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     ll_clearSharers;
     nn_addSharer;
     i_allocateTBE;
+    micro_miss;
     ss_recordGetSL1ID;
     a_issueFetchToMemory;
     uu_profileMiss;
@@ -1182,6 +1583,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     ll_clearSharers;
     nn_addSharer;
     i_allocateTBE;
+    micro_miss;
     ss_recordGetSL1ID;
     a_issueFetchToMemory;
     uu_profileMiss;
@@ -1193,6 +1595,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     ll_clearSharers;
     // nn_addSharer;
     i_allocateTBE;
+    micro_miss;
     xx_recordGetXL1ID;
     a_issueFetchToMemory;
     uu_profileMiss;
@@ -1203,6 +1606,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     qq_allocateL2CacheBlock;
     ll_clearSharers;
     si_allocateSPMTBE;
+    micro_miss;
     sa_issueSilentFetchToMemory;
     uu_profileMiss;
     jj_popL1RequestQueue;
@@ -1216,6 +1620,18 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   transition(SPM_IS, Mem_Data, NP) {
     sdm_sendSPMDataFromMemory;
     rr_deallocateL2CacheBlock;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+    kd_wakeUpDependents;
+  }
+
+  // M means data is held at LLC with no private coherent sharers. Dirty is
+  // false for a memory fill; ordinary M eviction/invalidation paths return
+  // ownership to the directory. Unlike the legacy path, this is tracked data.
+  transition(SPM_IS, Mem_Data_SPM_Retain, M) {
+    m_writeDataToCache;
+    sdm_sendSPMDataFromMemory;
+    set_setMRU;
     s_deallocateTBE;
     o_popIncomingResponseQueue;
     kd_wakeUpDependents;
@@ -1323,12 +1739,14 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
 
   transition(SS, L2_Replacement_clean, I_I) {
     i_allocateTBE;
+    micro_write;
     f_sendInvToSharers;
     rr_deallocateL2CacheBlock;
   }
 
   transition(SS, {L2_Replacement, MEM_Inv}, S_I) {
     i_allocateTBE;
+    micro_write;
     f_sendInvToSharers;
     rr_deallocateL2CacheBlock;
   }
@@ -1378,12 +1796,14 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
 
   transition(M, {L2_Replacement, MEM_Inv}, M_I) {
     i_allocateTBE;
+    micro_write;
     c_exclusiveReplacement;
     rr_deallocateL2CacheBlock;
   }
 
   transition(M, L2_Replacement_clean, M_I) {
     i_allocateTBE;
+    micro_write;
     c_exclusiveCleanReplacement;
     rr_deallocateL2CacheBlock;
   }
@@ -1421,12 +1841,14 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
 
   transition(MT, {L2_Replacement, MEM_Inv}, MT_I) {
     i_allocateTBE;
+    micro_write;
     f_sendInvToSharers;
     rr_deallocateL2CacheBlock;
   }
 
   transition(MT, L2_Replacement_clean, MCT_I) {
     i_allocateTBE;
+    micro_write;
     f_sendInvToSharers;
     rr_deallocateL2CacheBlock;
   }

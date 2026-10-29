@@ -32,6 +32,7 @@
 #include "mem/ruby/network/garnet/InputUnit.hh"
 
 #include "debug/RubyNetwork.hh"
+#include "mem/ruby/network/CacheFlexTiming.hh"
 #include "mem/ruby/network/garnet/Credit.hh"
 #include "mem/ruby/network/garnet/Router.hh"
 
@@ -80,6 +81,8 @@ InputUnit::wakeup()
     if (m_in_link->isReady(curTick())) {
 
         t_flit = m_in_link->consumeLink();
+        CFT_FLIT("ROUTER_ARRIVE", t_flit, "router=%d port=%d link=%s",
+                 m_router->get_id(), m_id, m_in_link->name());
         DPRINTF(RubyNetwork, "Router[%d] Consuming:%s Width: %d Flit:%s\n",
         m_router->get_id(), m_in_link->name(),
         m_router->getBitWidth(), *t_flit);
@@ -133,6 +136,8 @@ InputUnit::wakeup()
             m_router->schedule_wakeup(Cycles(wait_time));
         }
 
+        CFT_FLIT("ROUTER_READY", t_flit, "router=%d ready=%llu",
+                 m_router->get_id(), t_flit->get_stage().second);
         if (m_in_link->isReady(curTick())) {
             m_router->schedule_wakeup(Cycles(1));
         }
@@ -149,6 +154,16 @@ InputUnit::increment_credit(int in_vc, bool free_signal, Tick curTime)
     Credit *t_credit = new Credit(in_vc, free_signal, curTime);
     creditQueue.insert(t_credit);
     m_credit_link->scheduleEventAbsolute(m_router->clockEdge(Cycles(1)));
+}
+
+bool
+InputUnit::functionalRead(Packet *pkt)
+{
+    for (auto& virtual_channel : virtualChannels) {
+        if (virtual_channel.functionalRead(pkt))
+            return true;
+    }
+    return false;
 }
 
 bool

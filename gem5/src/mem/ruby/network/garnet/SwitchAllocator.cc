@@ -32,6 +32,7 @@
 #include "mem/ruby/network/garnet/SwitchAllocator.hh"
 
 #include "debug/RubyNetwork.hh"
+#include "mem/ruby/network/CacheFlexTiming.hh"
 #include "mem/ruby/network/garnet/GarnetNetwork.hh"
 #include "mem/ruby/network/garnet/InputUnit.hh"
 #include "mem/ruby/network/garnet/OutputUnit.hh"
@@ -55,6 +56,14 @@ SwitchAllocator::SwitchAllocator(Router *router)
 
     m_input_arbiter_activity = 0;
     m_output_arbiter_activity = 0;
+
+    const int vnets = m_router->get_num_vnets();
+    m_sa_ready.resize(vnets, 0);
+    m_sa_requests.resize(vnets, 0);
+    m_sa_grants.resize(vnets, 0);
+    m_no_free_vc.resize(vnets, 0);
+    m_no_credit.resize(vnets, 0);
+    m_ordering_blocked.resize(vnets, 0);
 }
 
 void
@@ -121,6 +130,9 @@ SwitchAllocator::arbitrate_inports()
             if (input_unit->need_stage(invc, SA_, curTick())) {
                 // This flit is in SA stage
 
+                const int vnet = get_vnet(invc);
+                m_sa_ready[vnet]++;
+
                 int outport = input_unit->get_outport(invc);
                 int outvc = input_unit->get_outvc(invc);
 
@@ -130,6 +142,7 @@ SwitchAllocator::arbitrate_inports()
                     send_allowed(inport, invc, outport, outvc);
 
                 if (make_request) {
+                    m_sa_requests[vnet]++;
                     m_input_arbiter_activity++;
                     m_port_requests[inport] = outport;
                     m_vc_winners[inport] = invc;
@@ -187,6 +200,9 @@ SwitchAllocator::arbitrate_outports()
 
                 // remove flit from Input VC
                 flit *t_flit = input_unit->getTopFlit(invc);
+                CFT_FLIT("SA_GRANT", t_flit, "router=%d in=%d out=%d outvc=%d",
+                         m_router->get_id(), inport, outport, outvc);
+                m_sa_grants[get_vnet(invc)]++;
 
                 DPRINTF(RubyNetwork, "SwitchAllocator at Router %d "
                                      "granted outvc %d at outport %d "
@@ -297,7 +313,8 @@ SwitchAllocator::send_allowed(int inport, int invc, int outport, int outvc)
         // needs outvc
         // this is only true for HEAD and HEAD_TAIL flits.
 
-        if (output_unit->has_free_vc(vnet)) {
+        if (output_unit->has_free_vc(vnet,
+                m_router->getInputUnit(inport)->peekTopFlit(invc)->get_route().dest_ni)) {
 
             has_outvc = true;
 
@@ -310,8 +327,18 @@ SwitchAllocator::send_allowed(int inport, int invc, int outport, int outvc)
     }
 
     // cannot send if no outvc or no credit.
-    if (!has_outvc || !has_credit)
+    if (!has_outvc) {
+        m_no_free_vc[vnet]++;
+        CFT_FLIT("SA_NO_VC", m_router->getInputUnit(inport)->peekTopFlit(invc),
+                 "router=%d out=%d", m_router->get_id(), outport);
         return false;
+    }
+    if (!has_credit) {
+        m_no_credit[vnet]++;
+        CFT_FLIT("SA_NO_CREDIT", m_router->getInputUnit(inport)->peekTopFlit(invc),
+                 "router=%d out=%d", m_router->get_id(), outport);
+        return false;
+    }
 
 
     // protocol ordering check
@@ -326,9 +353,15 @@ SwitchAllocator::send_allowed(int inport, int invc, int outport, int outvc)
         int vc_base = vnet*m_vc_per_vnet;
         for (int vc_offset = 0; vc_offset < m_vc_per_vnet; vc_offset++) {
             int temp_vc = vc_base + vc_offset;
+            if (!m_router->get_net_ptr()->sameRequestVCClass(
+                    vnet, invc, temp_vc, m_vc_per_vnet))
+                continue;
             if (input_unit->need_stage(temp_vc, SA_, curTick()) &&
                (input_unit->get_outport(temp_vc) == outport) &&
                (input_unit->get_enqueue_time(temp_vc) < t_enqueue_time)) {
+                m_ordering_blocked[vnet]++;
+                CFT_FLIT("SA_ORDERING", m_router->getInputUnit(inport)->peekTopFlit(invc),
+                         "router=%d out=%d", m_router->get_id(), outport);
                 return false;
             }
         }
@@ -343,7 +376,8 @@ SwitchAllocator::vc_allocate(int outport, int inport, int invc)
 {
     // Select a free VC from the output port
     int outvc =
-        m_router->getOutputUnit(outport)->select_free_vc(get_vnet(invc));
+        m_router->getOutputUnit(outport)->select_free_vc(get_vnet(invc),
+            m_router->getInputUnit(inport)->peekTopFlit(invc)->get_route().dest_ni);
 
     // has to get a valid VC since it checked before performing SA
     assert(outvc != -1);
@@ -394,6 +428,12 @@ SwitchAllocator::resetStats()
 {
     m_input_arbiter_activity = 0;
     m_output_arbiter_activity = 0;
+    std::fill(m_sa_ready.begin(), m_sa_ready.end(), 0);
+    std::fill(m_sa_requests.begin(), m_sa_requests.end(), 0);
+    std::fill(m_sa_grants.begin(), m_sa_grants.end(), 0);
+    std::fill(m_no_free_vc.begin(), m_no_free_vc.end(), 0);
+    std::fill(m_no_credit.begin(), m_no_credit.end(), 0);
+    std::fill(m_ordering_blocked.begin(), m_ordering_blocked.end(), 0);
 }
 
 } // namespace garnet

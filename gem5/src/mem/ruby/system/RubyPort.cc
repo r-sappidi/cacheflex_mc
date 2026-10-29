@@ -66,7 +66,14 @@ RubyPort::RubyPort(const Params &p)
                    p.ruby_system->getAccessBackingStore(), -1,
                    p.no_retry_on_stall),
       gotAddrRanges(p.port_interrupt_out_port_connection_count),
-      m_isCPUSequencer(p.is_cpu_sequencer)
+      m_isCPUSequencer(p.is_cpu_sequencer),
+      ifetchSameTickResponse(p.cacheflex_ifetch_same_tick_response),
+      ADD_STAT(ifetchEdgeEligible, statistics::units::Count::get(),
+               "Completed IFETCH responses eligible for edge diagnostic"),
+      ADD_STAT(ifetchEdgeDirect, statistics::units::Count::get(),
+               "IFETCH responses delivered without PacketQueue extra tick"),
+      ADD_STAT(ifetchEdgeQueued, statistics::units::Count::get(),
+               "IFETCH edge diagnostic falling back to ordered retry queue")
 {
     assert(m_version != -1);
 
@@ -682,7 +689,15 @@ RubyPort::MemResponsePort::hitCallback(PacketPtr pkt)
         // Send a response in the same cycle. There is no need to delay the
         // response because the response latency is already incurred in the
         // Ruby protocol.
-        schedTimingResp(pkt, curTick());
+        if (owner.ifetchSameTickResponse && pkt->req->isInstFetch()) {
+            ++owner.ifetchEdgeEligible;
+            if (queue.deliverCompletedIfetch(pkt))
+                ++owner.ifetchEdgeDirect;
+            else
+                ++owner.ifetchEdgeQueued;
+        } else {
+            schedTimingResp(pkt, curTick());
+        }
     } else {
         delete pkt;
     }

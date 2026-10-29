@@ -1,5 +1,4 @@
-# Copyright (c) 2016, 2019, 2025 Arm Limited
-# Copyright (c) 2022-2023 The University of Edinburgh
+# Copyright (c) 2016, 2019 ARM Limited
 # All rights reserved.
 #
 # The license below extends only to copyright in the software and shall
@@ -37,28 +36,50 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from m5.citations import add_citation
 from m5.defines import buildEnv
 from m5.objects.BaseCPU import BaseCPU
 
 # from m5.objects.O3Checker import O3Checker
 from m5.objects.BranchPredictor import *
 from m5.objects.FUPool import *
-from m5.objects.IndexingPolicies import *
-from m5.objects.IQUnit import *
-from m5.objects.ReplacementPolicies import *
-from m5.objects.SMT import *
 from m5.params import *
 from m5.proxy import *
-from m5.SimObject import *
+
+
+class SMTFetchPolicy(ScopedEnum):
+    vals = ["RoundRobin", "Branch", "IQCount", "LSQCount"]
+
+
+class SMTQueuePolicy(ScopedEnum):
+    vals = ["Dynamic", "Partitioned", "Threshold"]
+
+
+class CommitPolicy(ScopedEnum):
+    vals = ["RoundRobin", "OldestReady"]
 
 
 class BaseO3CPU(BaseCPU):
     type = "BaseO3CPU"
     cxx_class = "gem5::o3::CPU"
     cxx_header = "cpu/o3/dyn_inst.hh"
-    spm_port = RequestPort("SPM interface port")
-    _cached_ports = BaseCPU._cached_ports + ["spm_port"]
+    # jq86
+    spm_port = RequestPort("SPM interface port")  # weihang
+    bridge_port = RequestPort("Bounded bridge request interface (opt-in)")
+    reduction_port = RequestPort("Reduction capture retry interface; shares SPM issue bandwidth")
+    cacheFlexIndependentReduction = Param.Bool(False,
+        "Isolate reduction capture backpressure without changing buffers or issue bandwidth")
+    cacheFlexIndependentBridge = Param.Bool(False,
+        "Isolate bridge/SPM retries from coherent requests; no extra issue bandwidth")
+    cacheFlexBoundedTracking = Param.Bool(False,
+        "Charge bridge shadows to SPM SQ and retain LQ credits for outstanding squashed loads")
+    cacheFlexSpmStoreForwarding = Param.Bool(False,
+        "Forward fully covered SPM loads from the youngest older SPM SQ store")
+    cacheFlexSpmForwardLatency = Param.Cycles(2,
+        "SPM store forwarding lookup/data latency; existing load ports limit bandwidth")
+    cacheFlexSpmEarlyAddress = Param.Bool(False,
+        "Resolve pure SVE SPM store addresses independently of data: one/cycle, one-cycle latency")
+    _cached_ports = BaseCPU._cached_ports + ["spm_port", "bridge_port"]
+
 
     @classmethod
     def memory_mode(cls):
@@ -78,15 +99,11 @@ class BaseO3CPU(BaseCPU):
         200, "Cache Ports. Constrains stores only."
     )
     cacheLoadPorts = Param.Unsigned(200, "Cache Ports. Constrains loads only.")
-    spmStorePorts = Param.Unsigned(
-        200, "SPM ports. Constrains SPM stores only."
-    )
-    spmLoadPorts = Param.Unsigned(
-        200, "SPM ports. Constrains SPM loads only."
-    )
+    spmLoadPorts = Param.Unsigned(200,
+        "SPM load ports per cycle (spm.ld1qd via spmPort, independent of cache ports).")
+    spmStorePorts = Param.Unsigned(200,
+        "SPM store ports per cycle (SPMCP via spmPort, independent of cache ports).")
 
-    # Backward pipeline delays
-    fetchToBacDelay = Param.Cycles(1, "Fetch to Branch address calc. delay")
     decodeToFetchDelay = Param.Cycles(1, "Decode to fetch delay")
     renameToFetchDelay = Param.Cycles(1, "Rename to fetch delay")
     iewToFetchDelay = Param.Cycles(1, "Issue/Execute/Writeback to fetch delay")
@@ -102,9 +119,6 @@ class BaseO3CPU(BaseCPU):
         1, "Issue/Execute/Writeback to decode delay"
     )
     commitToDecodeDelay = Param.Cycles(1, "Commit to decode delay")
-
-    # Forward pipeline delays
-    bacToFetchDelay = Param.Cycles(1, "Branch address calc. to fetch delay")
     fetchToDecodeDelay = Param.Cycles(1, "Fetch to decode delay")
     decodeWidth = Param.Unsigned(8, "Decode width")
 
@@ -127,16 +141,14 @@ class BaseO3CPU(BaseCPU):
     dispatchWidth = Param.Unsigned(8, "Dispatch width")
     issueWidth = Param.Unsigned(8, "Issue width")
     wbWidth = Param.Unsigned(8, "Writeback width")
+    fuPool = Param.FUPool(DefaultFUPool(), "Functional Unit pool")
 
     iewToCommitDelay = Param.Cycles(
         1, "Issue/Execute/Writeback to commit delay"
     )
     renameToROBDelay = Param.Cycles(1, "Rename to reorder buffer delay")
     commitWidth = Param.Unsigned(8, "Commit width")
-    squashWidth = OptionalParam.Unsigned(
-        "Squash width. If unspecified all instructions are "
-        "squashed instantly within one cycle.",
-    )
+    squashWidth = Param.Unsigned(8, "Squash width")
     trapLatency = Param.Cycles(13, "Trap latency")
     fetchTrapLatency = Param.Cycles(1, "Fetch trap latency")
 
@@ -149,12 +161,6 @@ class BaseO3CPU(BaseCPU):
 
     LQEntries = Param.Unsigned(32, "Number of load queue entries")
     SQEntries = Param.Unsigned(32, "Number of store queue entries")
-    SPMLQEntries = Param.Unsigned(
-        32, "Number of dedicated CacheFlex SPM load queue entries"
-    )
-    SPMSQEntries = Param.Unsigned(
-        48, "Number of dedicated CacheFlex SPM store queue entries"
-    )
     LSQDepCheckShift = Param.Unsigned(
         4, "Number of places to shift addr before check"
     )
@@ -169,19 +175,7 @@ class BaseO3CPU(BaseCPU):
         "should be invalidated",
     )
     LFSTSize = Param.Unsigned(1024, "Last fetched store table size")
-    SSITSize = Param.MemorySize("1024", "Store set ID table size")
-    SSITAssoc = Param.Unsigned(1, "SSIT table associativity")
-    SSITReplPolicy = Param.BaseReplacementPolicy(
-        LRURP(), "SSIT replacement policy"
-    )
-    SSITIndexingPolicy = Param.BaseIndexingPolicy(
-        SetAssociative(
-            size=Parent.SSITSize * 4,
-            assoc=Parent.SSITAssoc,
-            entry_size=4,
-        ),
-        "SSIT indexing policy",
-    )
+    SSITSize = Param.Unsigned(1024, "Store set ID table size")
 
     numRobs = Param.Unsigned(1, "Number of Reorder Buffers")
 
@@ -198,7 +192,7 @@ class BaseO3CPU(BaseCPU):
     numPhysMatRegs = Param.Unsigned(2, "Number of physical matrix registers")
     # most ISAs don't use condition-code regs, so default is 0
     numPhysCCRegs = Param.Unsigned(0, "Number of physical cc registers")
-    instQueues = VectorParam.IQUnit(IQUnit(), "Vector of IQs")
+    numIQEntries = Param.Unsigned(64, "Number of instruction queue entries")
     numROBEntries = Param.Unsigned(192, "Number of reorder buffer entries")
 
     smtNumFetchingThreads = Param.Unsigned(1, "SMT Number of Fetching Threads")
@@ -207,6 +201,8 @@ class BaseO3CPU(BaseCPU):
         "Partitioned", "SMT LSQ Sharing Policy"
     )
     smtLSQThreshold = Param.Int(100, "SMT LSQ Threshold Sharing Parameter")
+    smtIQPolicy = Param.SMTQueuePolicy("Partitioned", "SMT IQ Sharing Policy")
+    smtIQThreshold = Param.Int(100, "SMT IQ Threshold Sharing Parameter")
     smtROBPolicy = Param.SMTQueuePolicy(
         "Partitioned", "SMT ROB Sharing Policy"
     )
@@ -220,54 +216,17 @@ class BaseO3CPU(BaseCPU):
         "Branch Predictor",
     )
     needsTSO = Param.Bool(False, "Enable TSO Memory model")
-
-    recvRespThrottling = Param.Bool(
-        False, "Enable load receive response throttling in the LSQ"
+    cacheFlexPcProfile = Param.Bool(False, "Observe ROB-head PCs without guest instrumentation (single-thread cores)")
+    cacheFlexBoundaryPcs = VectorParam.Addr([], "Opt-in retired-PC phase boundary observer")
+    cacheFlexKernelStartPc = Param.Addr(
+        0, "Inclusive PC of a zero-overhead CacheFlex kernel profile window"
     )
-    recvRespMaxCachelines = Param.Unsigned(
-        1,
-        "Maximum number of different receive response cachelines per cycle",
+    cacheFlexKernelEndPc = Param.Addr(
+        0, "Exclusive PC of a zero-overhead CacheFlex kernel profile window"
     )
-    recvRespBufferSize = Param.Unsigned(
-        64, "Maximum number of receive response bytes per cycle"
+    cacheFlexKernelBLoadStartPc = Param.Addr(
+        0, "Inclusive PC of the cache-baseline B-load instruction"
     )
-
-    ## Parameters for decoupled front-end
-    decoupledFrontEnd = Param.Bool(False, "Enables the decoupled front-end")
-    numFTQEntries = Param.Unsigned(
-        8,
-        "Number of entries in the Fetch target queue. (only used for "
-        "decoupled front-end)",
+    cacheFlexKernelBLoadEndPc = Param.Addr(
+        0, "Exclusive PC of the cache-baseline B-load instruction"
     )
-    minInstSize = Param.Unsigned(
-        1,
-        "Minimum instruction size (bytes). Determines the granularity "
-        "of the instruction minimum search width per cycle",
-    )
-    fetchTargetWidth = Param.Unsigned(
-        32,
-        "Max width (bytes) of Fetch target. "
-        "Determines the maximum search width per cycle",
-    )
-    maxFTPerCycle = Param.Unsigned(4, "Max number of FT created per cycle")
-    maxTakenPredPerCycle = Param.Unsigned(
-        1, "Max number of taken predictions per cycle"
-    )
-
-
-add_citation(
-    BaseO3CPU,
-    """@inproceedings{10.1145/3613424.3614258,
-  author    = {Schall, David and
-               Sandberg, Andreas and
-               Grot, Boris},
-  title     = {Warming Up a Cold Front-End with Ignite},
-  year      = {2023},
-  publisher = {Association for Computing Machinery},
-  address   = {Toronto, ON, Canada},
-  doi       = {10.1145/3613424.3614258},
-  booktitle = {Proceedings of the 56th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO '23)},
-  series    = {MICRO'23}
-}
-""",
-)

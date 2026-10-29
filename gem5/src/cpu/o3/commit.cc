@@ -1,6 +1,6 @@
 /*
  * Copyright 2014 Google, Inc.
- * Copyright (c) 2010-2014, 2017, 2020, 2025 ARM Limited
+ * Copyright (c) 2010-2014, 2017, 2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -40,8 +40,12 @@
  */
 
 #include "cpu/o3/commit.hh"
+#include "debug/CacheFlexDeps.hh"
+#include "debug/CacheFlexResidency.hh"
+#include "debug/CacheFlexBoundary.hh"
 
 #include <algorithm>
+#include <climits>
 #include <set>
 #include <string>
 
@@ -62,6 +66,7 @@
 #include "debug/Drain.hh"
 #include "debug/ExecFaulting.hh"
 #include "debug/HtmCpu.hh"
+#include "debug/O3PipeView.hh"
 #include "params/BaseO3CPU.hh"
 #include "sim/faults.hh"
 #include "sim/full_system.hh"
@@ -71,27 +76,6 @@ namespace gem5
 
 namespace o3
 {
-
-// clang-format off
-std::string Commit::CommitStats::statusStrings[ThreadStatusMax] = {
-    "running",
-    "idle",
-    "robSquashing",
-    "trapPending",
-    "fetchTrapPending",
-    "squashAfterPending",
-};
-
-std::string Commit::CommitStats::statusDefinitions[ThreadStatusMax] = {
-    "Number of cycles commit is running",
-    "Number of cycles commit is idle",
-    "Number of cycles commit is squashing the ROB",
-    "Number of cycles commit is processing a trap",
-    "Number of cycles commit is processing a fetch trap",
-    "Number of cycles commit is squashing instructions after a pending "
-    "squash",
-};
-// clang-format on
 
 void
 Commit::processTrapEvent(ThreadID tid)
@@ -118,6 +102,21 @@ Commit::Commit(CPU *_cpu, const BaseO3CPUParams &params)
       avoidQuiesceLiveLock(false),
       stats(_cpu, this)
 {
+    kernelStartPc = params.cacheFlexKernelStartPc;
+    pcProfile = params.cacheFlexPcProfile;
+    boundaryPcs.insert(params.cacheFlexBoundaryPcs.begin(),
+                       params.cacheFlexBoundaryPcs.end());
+    if (pcProfile) {
+        statistics::registerDumpCallback([this]() { profileAccountSleep(); });
+        statistics::registerResetCallback([this]() {
+            pcSleepCursor = std::max(pcSleepCursor, uint64_t(cpu->curCycle()));
+        });
+    }
+    fatal_if(pcProfile && numThreads != 1,
+             "CacheFlex PC profiling currently requires one thread per core");
+    kernelEndPc = params.cacheFlexKernelEndPc;
+    kernelBLoadStartPc = params.cacheFlexKernelBLoadStartPc;
+    kernelBLoadEndPc = params.cacheFlexKernelBLoadEndPc;
     if (commitWidth > MaxWidth)
         fatal("commitWidth (%d) is larger than compiled limit (%d),\n"
              "\tincrease MaxWidth in src/cpu/o3/limits.hh\n",
@@ -167,8 +166,16 @@ Commit::regProbePoints()
 
 Commit::CommitStats::CommitStats(CPU *cpu, Commit *commit)
     : statistics::Group(cpu, "commit"),
-      ADD_STAT(status, statistics::units::Cycle::get(),
-               "Commit status cycles"),
+      ADD_STAT(pcHeadCycles, statistics::units::Cycle::get(), "Start-of-commit ROB-head PC cycles"),
+      ADD_STAT(pcSleepHeadCycles, statistics::units::Cycle::get(), "Unticked idle cycles attributed to head at idle entry"),
+      ADD_STAT(pcSleepEmptyCycles, statistics::units::Cycle::get(), "Unticked idle cycles with empty ROB at idle entry"),
+      ADD_STAT(pcSuspendedCycles, statistics::units::Cycle::get(), "Unticked cycles while software context is suspended"),
+      ADD_STAT(pcSleepCycles, statistics::units::Cycle::get(), "All unticked cycles, clipped at statistics boundaries"),
+      ADD_STAT(pcNoRetireCycles, statistics::units::Cycle::get(), "ROB-head PC cycles with no retirement (subset of head cycles)"),
+      ADD_STAT(pcNotExecutedCycles, statistics::units::Cycle::get(), "No-retirement head not executed (subset, not necessarily a memory miss)"),
+      ADD_STAT(pcRetiredMicroops, statistics::units::Count::get(), "Retired microops by instruction PC"),
+      ADD_STAT(pcEmptyRobCycles, statistics::units::Cycle::get(), "Observed commit ticks with empty ROB"),
+      ADD_STAT(pcObservedCycles, statistics::units::Cycle::get(), "All observed commit ticks, excludes CPU sleep"),
       ADD_STAT(commitSquashedInsts, statistics::units::Count::get(),
                "The number of squashed insts skipped by commit"),
       ADD_STAT(commitNonSpecStalls, statistics::units::Count::get(),
@@ -182,18 +189,42 @@ Commit::CommitStats::CommitStats(CPU *cpu, Commit *commit)
                "Number of atomic instructions committed"),
       ADD_STAT(membars, statistics::units::Count::get(),
                "Number of memory barriers committed"),
+      ADD_STAT(functionCalls, statistics::units::Count::get(),
+               "Number of function calls committed."),
       ADD_STAT(committedInstType, statistics::units::Count::get(),
                "Class of committed instruction"),
       ADD_STAT(commitEligibleSamples, statistics::units::Cycle::get(),
-               "number cycles where commit BW limit reached")
+               "number cycles where commit BW limit reached"),
+      ADD_STAT(kernelProfileCycles, statistics::units::Cycle::get(),
+               "Cycles in marked CacheFlex microkernel windows"),
+      ADD_STAT(kernelComputeCycles, statistics::units::Cycle::get(),
+               "Kernel cycles attributed to vector/FP compute"),
+      ADD_STAT(kernelSpmDataCycles, statistics::units::Cycle::get(),
+               "Kernel cycles attributed to SPM B loads"),
+      ADD_STAT(kernelCacheDataCycles, statistics::units::Cycle::get(),
+               "Kernel cycles attributed to regular-cache A loads"),
+      ADD_STAT(kernelCacheBDataCycles, statistics::units::Cycle::get(),
+               "Kernel cycles attributed to cache-baseline B loads"),
+      ADD_STAT(kernelStoreCycles, statistics::units::Cycle::get(),
+               "Kernel cycles attributed to C stores/writeback"),
+      ADD_STAT(kernelFrontendControlCycles, statistics::units::Cycle::get(),
+               "Kernel cycles attributed to an empty ROB or control work"),
+      ADD_STAT(kernelOtherBackendCycles, statistics::units::Cycle::get(),
+               "Kernel cycles attributed to other backend work"),
+      ADD_STAT(kernelClassifiedCycles, statistics::units::Cycle::get(),
+               "Sum of mutually exclusive kernel cycle classes",
+               kernelComputeCycles + kernelSpmDataCycles +
+               kernelCacheDataCycles + kernelCacheBDataCycles +
+               kernelStoreCycles +
+               kernelFrontendControlCycles + kernelOtherBackendCycles)
 {
     using namespace statistics;
+    pcHeadCycles.init(0);
+    pcSleepHeadCycles.init(0);
+    pcNoRetireCycles.init(0);
+    pcNotExecutedCycles.init(0);
+    pcRetiredMicroops.init(0);
 
-    status.init(ThreadStatusMax).flags(statistics::pdf | statistics::nozero);
-    for (int i = 0; i < ThreadStatusMax; ++i) {
-        status.subname(i, statusStrings[i]);
-        status.subdesc(i, statusDefinitions[i]);
-    }
     commitSquashedInsts.prereq(commitSquashedInsts);
     commitNonSpecStalls.prereq(commitNonSpecStalls);
     branchMispredicts.prereq(branchMispredicts);
@@ -208,6 +239,10 @@ Commit::CommitStats::CommitStats(CPU *cpu, Commit *commit)
 
     membars
         .init(cpu->numThreads)
+        .flags(total);
+
+    functionCalls
+        .init(commit->numThreads)
         .flags(total);
 
     committedInstType
@@ -316,12 +351,6 @@ Commit::clearStates(ThreadID tid)
     pc[tid].reset(cpu->tcBase(tid)->getIsaPtr()->newPCState());
     lastCommitedSeqNum[tid] = 0;
     squashAfterInst[tid] = NULL;
-
-    // Clear out any of this thread's instructions being sent to prior stages.
-    for (int i = -cpu->timeBuffer.getPast(); i <= cpu->timeBuffer.getFuture();
-         ++i) {
-        cpu->timeBuffer[i].commitInfo[tid] = {};
-    }
 }
 
 void Commit::drain() { drainPending = true; }
@@ -393,8 +422,8 @@ Commit::takeOverFrom()
 void
 Commit::deactivateThread(ThreadID tid)
 {
-    auto thread_it = std::find(
-            priority_list.begin(), priority_list.end(), tid);
+    std::list<ThreadID>::iterator thread_it = std::find(priority_list.begin(),
+            priority_list.end(), tid);
 
     if (thread_it != priority_list.end()) {
         priority_list.erase(thread_it);
@@ -425,7 +454,12 @@ void
 Commit::updateStatus()
 {
     // reset ROB changed variable
-    for (ThreadID tid : *activeThreads) {
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         changedROBNumEntries[tid] = false;
 
         // Also check if any of the threads has a trap pending
@@ -449,7 +483,12 @@ Commit::updateStatus()
 bool
 Commit::changedROBEntries()
 {
-    for (ThreadID tid : *activeThreads) {
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         if (changedROBNumEntries[tid]) {
             return true;
         }
@@ -487,7 +526,6 @@ Commit::generateTrapEvent(ThreadID tid, Fault inst_fault)
     cpu->schedule(trap, cpu->clockEdge(latency));
     trapInFlight[tid] = true;
     thread[tid]->trapPending = true;
-    toIEW->commitInfo[tid].trapPending = true;
 }
 
 void
@@ -544,7 +582,6 @@ Commit::squashFromTrap(ThreadID tid)
     thread[tid]->trapPending = false;
     thread[tid]->noSquashFromTC = false;
     trapInFlight[tid] = false;
-    toIEW->commitInfo[tid].trapPending = false;
 
     trapSquash[tid] = false;
 
@@ -597,17 +634,94 @@ Commit::squashAfter(ThreadID tid, const DynInstPtr &head_inst)
 }
 
 void
+Commit::profileAccountSleep()
+{
+    if (!pcProfile || !pcSleeping)
+        return;
+    const uint64_t now = cpu->curCycle();
+    if (now <= pcSleepCursor)
+        return;
+    const uint64_t span = now - pcSleepCursor;
+    stats.pcSleepCycles += span;
+    if (pcSleepSuspended)
+        stats.pcSuspendedCycles += span;
+    else if (pcSleepHasHead) {
+        // SparseHistogram's multiplicity is int; split unusually long sleeps.
+        uint64_t left = span;
+        while (left) {
+            const int n = std::min<uint64_t>(left, INT_MAX);
+            stats.pcSleepHeadCycles.sample(pcSleepHead, n);
+            left -= n;
+        }
+    } else
+        stats.pcSleepEmptyCycles += span;
+    pcSleepCursor = now;
+}
+
+void
+Commit::profileIdleStart(bool suspended)
+{
+    if (!pcProfile)
+        return;
+    profileAccountSleep();
+    pcSleeping = true;
+    pcSleepSuspended = suspended;
+    pcSleepHasHead = !rob->isEmpty(0);
+    if (pcSleepHasHead)
+        pcSleepHead = rob->readHeadInst(0)->pcState().instAddr();
+    pcSleepCursor = uint64_t(cpu->curCycle()) + 1;
+}
+
+void
+Commit::profileIdleEnd()
+{
+    profileAccountSleep();
+    pcSleeping = false;
+}
+
+void
 Commit::tick()
 {
+    pcRetiredThisCycle = false;
+    DynInstPtr profileHead;
+    if (pcProfile) {
+        ++stats.pcObservedCycles;
+        if (!rob->isEmpty(0)) {
+            profileHead = rob->readHeadInst(0);
+            stats.pcHeadCycles.sample(profileHead->pcState().instAddr());
+            DPRINTF(CacheFlexResidency, "CFRES HEAD pc=%#x executed=%d\n",
+                    profileHead->pcState().instAddr(), profileHead->isExecuted());
+        } else {
+            ++stats.pcEmptyRobCycles;
+        }
+    }
+    kernelCommittedAny = false;
+    kernelCommittedCompute = false;
+    kernelCommittedSpmLoad = false;
+    kernelCommittedCacheLoad = false;
+    kernelCommittedCacheBLoad = false;
+    kernelCommittedStore = false;
+    kernelWindowActiveThisCycle = false;
+
+    if (kernelStartPc < kernelEndPc && !rob->isEmpty(0)) {
+        const Addr head_pc = rob->readHeadInst(0)->pcState().instAddr();
+        kernelWindowActiveThisCycle =
+            head_pc >= kernelStartPc && head_pc < kernelEndPc;
+    }
     wroteToTimeBuffer = false;
     _nextStatus = Inactive;
 
     if (activeThreads->empty())
         return;
 
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
+
     // Check if any of the threads are done squashing.  Change the
     // status if they are done.
-    for (ThreadID tid : *activeThreads) {
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         // Clear the bit saying if the thread has committed stores
         // this cycle.
         committedStores[tid] = false;
@@ -628,9 +742,21 @@ Commit::tick()
 
     commit();
 
+    if (profileHead && !pcRetiredThisCycle) {
+        stats.pcNoRetireCycles.sample(profileHead->pcState().instAddr());
+        if (!profileHead->isExecuted())
+            stats.pcNotExecutedCycles.sample(profileHead->pcState().instAddr());
+    }
+
+    classifyCacheFlexKernelCycle();
+
     markCompletedInsts();
 
-    for (ThreadID tid : *activeThreads) {
+    threads = activeThreads->begin();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         if (!rob->isEmpty(tid) && rob->readHeadInst(tid)->readyToCommit()) {
             // The ROB has more instructions it can commit. Its next status
             // will be active.
@@ -646,6 +772,8 @@ Commit::tick()
             const DynInstPtr &inst = rob->readHeadInst(tid);
 
             ppCommitStall->notify(inst);
+            DPRINTF(CacheFlexDeps, "CFD ROB_BLOCK sn=%llu pc=%#x\n",
+                    inst->seqNum, inst->pcState().instAddr());
 
             DPRINTF(Commit,"[tid:%i] Can't commit, Instruction [sn:%llu] PC "
                     "%s is head of ROB and not ready\n",
@@ -754,10 +882,14 @@ Commit::commit()
     ////////////////////////////////////
     // Check for any possible squashes, handle them first
     ////////////////////////////////////
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
 
     int num_squashing_threads = 0;
-    for (ThreadID tid : *activeThreads) {
-        stats.status[commitStatus[tid]]++;
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         // Not sure which one takes priority.  I think if we have
         // both, that's a bad sign.
         if (trapSquash[tid]) {
@@ -864,7 +996,11 @@ Commit::commit()
     }
 
     //Check for any activity
-    for (ThreadID tid : *activeThreads) {
+    threads = activeThreads->begin();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         if (changedROBNumEntries[tid]) {
             toIEW->commitInfo[tid].usedROB = true;
             toIEW->commitInfo[tid].freeROBEntries = rob->numFreeEntries(tid);
@@ -892,6 +1028,54 @@ Commit::commit()
             wroteToTimeBuffer = true;
         }
 
+    }
+}
+
+void
+Commit::classifyCacheFlexKernelCycle()
+{
+    if (!kernelWindowActiveThisCycle)
+        return;
+
+    ++stats.kernelProfileCycles;
+
+    // A cycle with architectural progress is assigned by the most expensive
+    // class retiring that cycle.  A no-progress cycle is assigned from the
+    // oldest instruction blocking retirement.  The ordered chain guarantees
+    // exactly one bin per marked cycle.
+    if (kernelCommittedCompute) {
+        ++stats.kernelComputeCycles;
+    } else if (kernelCommittedSpmLoad) {
+        ++stats.kernelSpmDataCycles;
+    } else if (kernelCommittedCacheBLoad) {
+        ++stats.kernelCacheBDataCycles;
+    } else if (kernelCommittedCacheLoad) {
+        ++stats.kernelCacheDataCycles;
+    } else if (kernelCommittedStore) {
+        ++stats.kernelStoreCycles;
+    } else if (kernelCommittedAny) {
+        ++stats.kernelFrontendControlCycles;
+    } else if (rob->isEmpty(0)) {
+        ++stats.kernelFrontendControlCycles;
+    } else {
+        const DynInstPtr &head = rob->readHeadInst(0);
+        if (head->isLoad() &&
+            (head->memReqFlags & Request::SPM_LOAD)) {
+            ++stats.kernelSpmDataCycles;
+        } else if (head->isLoad()) {
+            const Addr pc = head->pcState().instAddr();
+            if (kernelBLoadStartPc < kernelBLoadEndPc &&
+                pc >= kernelBLoadStartPc && pc < kernelBLoadEndPc)
+                ++stats.kernelCacheBDataCycles;
+            else
+                ++stats.kernelCacheDataCycles;
+        } else if (head->isStore()) {
+            ++stats.kernelStoreCycles;
+        } else if (head->isFloating() || head->isVector()) {
+            ++stats.kernelComputeCycles;
+        } else {
+            ++stats.kernelOtherBackendCycles;
+        }
     }
 }
 
@@ -971,12 +1155,12 @@ Commit::commitInsts()
         // so panic.
         } else if (head_inst->noCapableFU() &&
             head_inst->getFault() == NoFault)  {
-            panic("CPU cannot execute [sn:%llu] op_class: %s but"
-                  " did not trigger a fault. Do you need to update"
-                  " the configuration and add a functional unit for"
-                  " that op class?\n",
-                  head_inst->seqNum,
-                  enums::OpClassStrings[head_inst->opClass()]);
+            panic("CPU cannot execute [sn:%llu] op_class: %u but"
+              " did not trigger a fault. Do you need to update"
+              " the configuration and add a functional unit for"
+              " that op class?\n",
+              head_inst->seqNum,
+              head_inst->opClass());
         } else {
             set(pc[tid], head_inst->pcState());
 
@@ -985,6 +1169,46 @@ Commit::commitInsts()
 
             if (commit_success) {
                 ++num_committed;
+                if (!boundaryPcs.empty() &&
+                    (!head_inst->isMicroop() || head_inst->isFirstMicroop()) &&
+                    boundaryPcs.count(head_inst->pcState().instAddr())) {
+                    DPRINTF(CacheFlexBoundary, "CFBOUND pc=%#x sn=%llu\n",
+                            head_inst->pcState().instAddr(), head_inst->seqNum);
+                }
+                if (head_inst->effAddrValid() &&
+                    (head_inst->isLoad() || head_inst->isStore()) &&
+                    !head_inst->isDataPrefetch() && !head_inst->isInstPrefetch()) {
+                    DPRINTF(CacheFlexResidency,
+                            "CFRES RETIRED va=%#x pc=%#x bytes=%u store=%d spm=%d\n",
+                            head_inst->effAddr, head_inst->pcState().instAddr(),
+                            head_inst->effSize, head_inst->isStore(),
+                            bool(head_inst->memReqFlags &
+                                 (Request::SPM_LOAD | Request::SPM_STORE |
+                                  Request::CP_TO_SPM | Request::SPM_WRITEBACK)));
+                }
+                pcRetiredThisCycle = true;
+                if (pcProfile)
+                    stats.pcRetiredMicroops.sample(head_inst->pcState().instAddr());
+                if (kernelWindowActiveThisCycle) {
+                    kernelCommittedAny = true;
+                    kernelCommittedCompute |= !head_inst->isLoad() &&
+                        !head_inst->isStore() &&
+                        (head_inst->isFloating() || head_inst->isVector());
+                    kernelCommittedSpmLoad |= head_inst->isLoad() &&
+                        (head_inst->memReqFlags & Request::SPM_LOAD);
+                    kernelCommittedCacheLoad |= head_inst->isLoad() &&
+                        !(head_inst->memReqFlags & Request::SPM_LOAD);
+                    const Addr committed_pc =
+                        head_inst->pcState().instAddr();
+                    if (head_inst->isLoad() &&
+                        kernelBLoadStartPc < kernelBLoadEndPc &&
+                        committed_pc >= kernelBLoadStartPc &&
+                        committed_pc < kernelBLoadEndPc) {
+                        kernelCommittedCacheBLoad = true;
+                        kernelCommittedCacheLoad = false;
+                    }
+                    kernelCommittedStore |= head_inst->isStore();
+                }
                 cpu->commitStats[tid]
                     ->committedInstType[head_inst->opClass()]++;
                 stats.committedInstType[tid][head_inst->opClass()]++;
@@ -1248,11 +1472,20 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
     }
 
     updateComInstStats(head_inst);
+    DPRINTF(CacheFlexDeps, "CFD COMMIT sn=%llu pc=%#x upc=%llu\n",
+            head_inst->seqNum, head_inst->pcState().instAddr(),
+            uint64_t(head_inst->pcState().microPC()));
 
     DPRINTF(Commit,
             "[tid:%i] [sn:%llu] Committing instruction with PC %s\n",
             tid, head_inst->seqNum, head_inst->pcState());
-
+    if (head_inst->traceData) {
+        head_inst->traceData->setFetchSeq(head_inst->seqNum);
+        head_inst->traceData->setCPSeq(thread[tid]->numOp);
+        head_inst->traceData->dump();
+        delete head_inst->traceData;
+        head_inst->traceData = NULL;
+    }
     if (head_inst->isReturn()) {
         DPRINTF(Commit,
                 "[tid:%i] [sn:%llu] Return Instruction Committed PC %s \n",
@@ -1273,15 +1506,11 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
     // Finally clear the head ROB entry.
     rob->retireHead(tid);
 
-    head_inst->commitTick = curTick() - head_inst->fetchTick;
-
-    if (head_inst->traceData) {
-        head_inst->traceData->setFetchSeq(head_inst->seqNum);
-        head_inst->traceData->setCPSeq(thread[tid]->numOp);
-        head_inst->traceData->dump();
-        delete head_inst->traceData;
-        head_inst->traceData = NULL;
+#if TRACING_ON
+    if (debug::O3PipeView) {
+        head_inst->commitTick = curTick() - head_inst->fetchTick;
     }
+#endif
 
     // If this was a store, record it for this cycle.
     if (head_inst->isStore() || head_inst->isAtomic())
@@ -1347,23 +1576,13 @@ Commit::markCompletedInsts()
 void
 Commit::updateComInstStats(const DynInstPtr &inst)
 {
-    const ThreadID tid = inst->threadNumber;
-    const bool in_user_mode = cpu->inUserMode(tid);
+    ThreadID tid = inst->threadNumber;
 
-    // Count number of instructions, ensure we don't
-    // double count Microops as insts.
     if (!inst->isMicroop() || inst->isLastMicroop()) {
         cpu->commitStats[tid]->numInsts++;
         cpu->baseStats.numInsts++;
-        if (in_user_mode) {
-            cpu->commitStats[tid]->numUserInsts++;
-        }
     }
-
     cpu->commitStats[tid]->numOps++;
-    if (in_user_mode) {
-        cpu->commitStats[tid]->numUserOps++;
-    }
 
     // To match the old model, don't count nops and instruction
     // prefetches towards the total commit count.
@@ -1386,7 +1605,7 @@ Commit::updateComInstStats(const DynInstPtr &inst)
             cpu->commitStats[tid]->numLoadInsts++;
         }
 
-        if (inst->isStore() || inst->isAtomic()) {
+        if (inst->isStore()) {
             cpu->commitStats[tid]->numStoreInsts++;
         }
     }
@@ -1410,13 +1629,9 @@ Commit::updateComInstStats(const DynInstPtr &inst)
     }
 
     // Function Calls
-    if (inst->isCall()) {
-        cpu->commitStats[tid]->functionCalls++;
-    }
+    if (inst->isCall())
+        stats.functionCalls[tid]++;
 
-    if (inst->isCall() || inst->isReturn()) {
-        cpu->commitStats[tid]->numCallsReturns++;
-    }
 }
 
 ////////////////////////////////////////
@@ -1473,8 +1688,8 @@ Commit::getCommittingThread()
 ThreadID
 Commit::roundRobin()
 {
-    auto pri_iter = priority_list.begin();
-    auto end      = priority_list.end();
+    std::list<ThreadID>::iterator pri_iter = priority_list.begin();
+    std::list<ThreadID>::iterator end      = priority_list.end();
 
     while (pri_iter != end) {
         ThreadID tid = *pri_iter;
@@ -1504,7 +1719,12 @@ Commit::oldestReady()
     unsigned oldest_seq_num = 0;
     bool first = true;
 
-    for (ThreadID tid : *activeThreads) {
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         if (!rob->isEmpty(tid) &&
             (commitStatus[tid] == Running ||
              commitStatus[tid] == Idle ||

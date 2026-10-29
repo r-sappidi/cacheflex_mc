@@ -67,8 +67,8 @@ class OutputUnit : public Consumer
     void decrement_credit(int out_vc);
     void increment_credit(int out_vc);
     bool has_credit(int out_vc);
-    bool has_free_vc(int vnet);
-    int select_free_vc(int vnet);
+    bool has_free_vc(int vnet, int dest = -1);
+    int select_free_vc(int vnet, int dest = -1);
 
     inline PortDirection get_direction() { return m_direction; }
 
@@ -104,6 +104,7 @@ class OutputUnit : public Consumer
         return m_vc_per_vnet;
     }
 
+    bool functionalRead(Packet *pkt);
     bool functionalRead(Packet *pkt, WriteMask &mask);
     uint32_t functionalWrite(Packet *pkt);
 

@@ -32,6 +32,7 @@
 
 #include "mem/ruby/network/garnet/Router.hh"
 
+#include "base/cprintf.hh"
 #include "debug/RubyNetwork.hh"
 #include "mem/ruby/network/garnet/CreditLink.hh"
 #include "mem/ruby/network/garnet/GarnetNetwork.hh"
@@ -216,6 +217,22 @@ Router::regStats()
         .name(name() + ".sw_output_arbiter_activity")
         .flags(statistics::nozero)
     ;
+
+#define INIT_VNET_STAT(stat, suffix)                                      \
+    stat.init(m_virtual_networks);                                        \
+    stat.name(name() + suffix);                                           \
+    stat.flags(statistics::pdf | statistics::total |                     \
+               statistics::nozero | statistics::oneline);                \
+    for (int vnet = 0; vnet < m_virtual_networks; ++vnet)                 \
+        stat.subname(vnet, csprintf("vnet-%d", vnet))
+
+    INIT_VNET_STAT(m_sa_ready, ".sa_ready_events");
+    INIT_VNET_STAT(m_sa_requests, ".sa_request_events");
+    INIT_VNET_STAT(m_sa_grants, ".sa_grant_events");
+    INIT_VNET_STAT(m_sa_no_free_vc, ".sa_no_free_vc_events");
+    INIT_VNET_STAT(m_sa_no_credit, ".sa_no_credit_events");
+    INIT_VNET_STAT(m_sa_ordering_blocked, ".sa_ordering_blocked_events");
+#undef INIT_VNET_STAT
 }
 
 void
@@ -232,6 +249,16 @@ Router::collateStats()
     m_sw_output_arbiter_activity =
         switchAllocator.get_output_arbiter_activity();
     m_crossbar_activity = crossbarSwitch.get_crossbar_activity();
+
+    for (int vnet = 0; vnet < m_virtual_networks; ++vnet) {
+        m_sa_ready[vnet] = switchAllocator.get_sa_ready()[vnet];
+        m_sa_requests[vnet] = switchAllocator.get_sa_requests()[vnet];
+        m_sa_grants[vnet] = switchAllocator.get_sa_grants()[vnet];
+        m_sa_no_free_vc[vnet] = switchAllocator.get_no_free_vc()[vnet];
+        m_sa_no_credit[vnet] = switchAllocator.get_no_credit()[vnet];
+        m_sa_ordering_blocked[vnet] =
+            switchAllocator.get_ordering_blocked()[vnet];
+    }
 }
 
 void
@@ -270,6 +297,22 @@ Router::printAggregateFaultProbability(std::ostream& out)
                                     &aggregate_fault_prob);
     out << "Router-" << m_id << " fault probability: ";
     out << aggregate_fault_prob << std::endl;
+}
+
+bool
+Router::functionalRead(Packet *pkt)
+{
+    if (crossbarSwitch.functionalRead(pkt))
+        return true;
+    for (auto& input_unit : m_input_unit) {
+        if (input_unit->functionalRead(pkt))
+            return true;
+    }
+    for (auto& output_unit : m_output_unit) {
+        if (output_unit->functionalRead(pkt))
+            return true;
+    }
+    return false;
 }
 
 bool

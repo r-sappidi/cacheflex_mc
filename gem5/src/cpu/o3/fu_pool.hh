@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013, 2025 Arm Limited
+ * Copyright (c) 2012-2013 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -131,6 +131,8 @@ class FUPool : public SimObject
     /** Functional units. */
     std::vector<FuncUnit *> funcUnits;
 
+    typedef std::vector<FuncUnit *>::iterator fuListIterator;
+
   public:
     typedef FUPoolParams Params;
     /** Constructs a FU pool. */
@@ -161,9 +163,6 @@ class FUPool : public SimObject
      * other instructions this cycle
      */
     static constexpr auto NoFreeFU = -1;
-
-    /** Returns true if the FU has the required capability */
-    bool isCapable(OpClass capability);
 
     /**
      * Gets a FU providing the requested capability. Will mark the

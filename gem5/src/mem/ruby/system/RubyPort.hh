@@ -45,6 +45,8 @@
 #include <cassert>
 #include <string>
 
+#include "base/statistics.hh"
+
 #include "mem/ruby/common/MachineID.hh"
 #include "mem/ruby/network/MessageBuffer.hh"
 #include "mem/ruby/protocol/RequestStatus.hh"
@@ -79,11 +81,32 @@ class RubyPort : public ClockedObject
         void recvRangeChange() {}
     };
 
+    class IfetchResponseQueue : public RespPacketQueue
+    {
+      public:
+        using RespPacketQueue::RespPacketQueue;
+
+        // An opt-in timing diagnostic, not a change to cache service latency.
+        // Never overtake queued responses. A rejected immediate send joins
+        // the ordinary retry queue and waits for recvRespRetry as usual.
+        bool deliverCompletedIfetch(PacketPtr pkt)
+        {
+            assert(pkt->req->isInstFetch());
+            if (size() == 0 && !waitingOnRetry) {
+                if (sendTiming(pkt))
+                    return true;
+                waitingOnRetry = true;
+            }
+            schedSendTiming(pkt, curTick());
+            return false;
+        }
+    };
+
     class MemResponsePort : public QueuedResponsePort
     {
       private:
         RubyPort& owner;
-        RespPacketQueue queue;
+        IfetchResponseQueue queue;
         bool access_backing_store;
         bool no_retry_on_stall;
 
@@ -242,6 +265,10 @@ class RubyPort : public ClockedObject
     std::vector<MemResponsePort *> retryList;
 
     bool m_isCPUSequencer;
+    const bool ifetchSameTickResponse;
+    statistics::Scalar ifetchEdgeEligible;
+    statistics::Scalar ifetchEdgeDirect;
+    statistics::Scalar ifetchEdgeQueued;
 };
 
 } // namespace ruby

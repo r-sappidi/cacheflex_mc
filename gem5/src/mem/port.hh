@@ -158,6 +158,9 @@ class RequestPort: public Port, public AtomicRequestProtocol,
      */
     void bind(Port &peer) override;
 
+    /** True for the O3 core's dedicated scratchpad request port. */
+    virtual bool isSPMPort() const { return false; }
+
     /**
      * Unbind this request port and the associated response port.
      */

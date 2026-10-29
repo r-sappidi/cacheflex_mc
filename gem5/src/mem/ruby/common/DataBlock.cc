@@ -207,6 +207,8 @@ void
 DataBlock::setData(const uint8_t *data, int offset, int len)
 {
     assert(m_alloc);
+    assert(offset >= 0 && len >= 0);
+    assert(offset <= m_block_size && len <= m_block_size - offset);
     memcpy(&m_data[offset], data, len);
 }
 

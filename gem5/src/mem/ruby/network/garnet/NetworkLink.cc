@@ -34,6 +34,7 @@
 
 #include "base/trace.hh"
 #include "debug/RubyNetwork.hh"
+#include "mem/ruby/network/CacheFlexTiming.hh"
 #include "mem/ruby/network/garnet/CreditLink.hh"
 
 namespace gem5
@@ -88,6 +89,8 @@ NetworkLink::wakeup()
     assert(curTick() == clockEdge());
     if (link_srcQueue->isReady(curTick())) {
         flit *t_flit = link_srcQueue->getTopFlit();
+        if (t_flit->get_type() != CREDIT_)
+            CFT_FLIT("LINK_SEND", t_flit, "arrival=%llu", clockEdge(m_latency));
         DPRINTF(RubyNetwork, "Transmission will finish at %ld :%s\n",
                 clockEdge(m_latency), *t_flit);
         if (m_type != NUM_LINK_TYPES_) {
@@ -117,6 +120,12 @@ NetworkLink::resetStats()
     }
 
     m_link_utilized = 0;
+}
+
+bool
+NetworkLink::functionalRead(Packet *pkt)
+{
+    return linkBuffer.functionalRead(pkt);
 }
 
 bool

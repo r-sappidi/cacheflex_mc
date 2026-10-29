@@ -61,6 +61,7 @@ enumeration(CoherenceRequestType, desc="...") {
   PUTM,        desc="Release modified coherent source with data for SPM copy";
   PUTE,        desc="Release exclusive coherent source for SPM copy";
   SPMWB_REQ,   desc="SPM writeback request";
+  L3_SPM, desc="Shared LLC scratchpad operation; not a coherent Get";
 }
 
 // CoherenceResponseType
@@ -78,7 +79,14 @@ enumeration(CoherenceResponseType, desc="...") {
   FLUSH_ACK, desc="Flush ack";
 
   PUT_ACK, desc="Ack for SPM source release";
+  SPM_SILENT_RETRY, desc="Stale owner; retry silent fetch from existing requester TBE";
   SPMWB_ACK, desc="SPM writeback ack";
+  L3_SPM_REPLY, desc="Shared scratchpad completion or data";
+  SPM_MCAST_DATA, desc="Multicast SPM line installation data";
+  SPM_MCAST_PENDING, desc="Multicast SPM destination is awaiting data";
+  SPM_MCAST_ACK, desc="Remote multicast SPM installation acknowledgement";
+  SPM_MCAST_CLAIM, desc="Reserve a multicast destination SPM slot";
+  SPM_MCAST_CLAIM_ACK, desc="Remote multicast SPM slot reservation acknowledgement";
 }
 
 // RequestMsg
@@ -93,6 +101,12 @@ structure(RequestMsg, desc="...", interface="Message") {
   MessageSizeType MessageSize,  desc="size category of the message";
   DataBlock DataBlk,            desc="Data for the cache line (if PUTX)";
   int Len;
+  int L3Op, default="0", desc="1 load,2 store,3 release,4 copy install,5 writeback read,6 claim";
+  Addr L3ReplyAddr, default="0", desc="Original sequencer transaction address";
+  bool SPMMasked, default="false", desc="Shared store byte mask valid";
+  WriteMask SPMWriteMask, desc="Shared store byte enables";
+  int MulticastMask, default="0", desc="Destination private-L1 core mask";
+  bool MulticastClaim, default="false", desc="Reserve multicast SPM destinations without fetching data";
   bool Dirty, default="false",  desc="Dirty bit";
   PrefetchBit Prefetch,         desc="Is this a prefetch request";
 
@@ -122,7 +136,12 @@ structure(ResponseMsg, desc="...", interface="Message") {
   DataBlock DataBlk,            desc="Data for the cache line";
   bool Dirty, default="false",  desc="Dirty bit";
   int AckCount, default="0",  desc="number of acks in this message";
+  int MulticastMask, default="0", desc="Destination private-L1 core mask";
+  bool MulticastClaim, default="false", desc="Reserve multicast SPM destinations without fetching data";
   MessageSizeType MessageSize,  desc="size category of the message";
+
+  int L3Op, default="0", desc="Shared SPM operation being completed";
+  int Len, default="0", desc="Shared SPM response payload length";
 
   bool functionalRead(Packet *pkt) {
     if (Type == CoherenceResponseType:DATA ||
@@ -189,6 +208,7 @@ enumeration(CoherenceClass, desc="...") {
 
 // Class for messages sent between the L0 and the L1 controllers.
 structure(CoherenceMsg, desc="...", interface="Message") {
+  Addr L3Finalize, default="0", desc="Finalization marker and FP32 scale, not a pointer";
   Addr addr,              desc="Physical address of the cache block";
   CoherenceClass Class,         desc="Type of message (GetS, GetX, PutX, etc)";
   RubyAccessMode AccessMode,    desc="user/supervisor access type";
@@ -196,11 +216,16 @@ structure(CoherenceMsg, desc="...", interface="Message") {
   MachineID Dest,        desc="What machine receives this message";
   MessageSizeType MessageSize,  desc="size category of the message";
   DataBlock DataBlk,            desc="Data for the cache line (if PUTX)";
+  bool SPMMasked, default="false", desc="SPM write has disabled byte lanes";
+  WriteMask SPMWriteMask, desc="SPM store byte enables, including wide vectors";
   Addr SrcAddr, default="0", desc="Coherent source address for SPM copy/writeback";
   Addr DstSPMAddr, default="0", desc="Encoded SPM slot address";
   int SPMSet, default="0", desc="Decoded SPM set index";
   int SPMWay, default="0", desc="Decoded SPM way id";
   int Len, default="0", desc="SPM operation length";
+  int MulticastMask, default="0", desc="Destination private-L1 core mask";
+  bool MulticastClaim, default="false", desc="Reserve multicast SPM destinations without fetching data";
+  bool SPMSnapshot, default="false", desc="SPMCP carries a retained L0 coherent snapshot";
   bool Dirty, default="false",  desc="Dirty bit";
   PrefetchBit Prefetch,         desc="Is this a prefetch request";
 

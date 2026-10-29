@@ -48,6 +48,7 @@ namespace ruby
 
 class FaultModel;
 class NetDest;
+class Message;
 
 namespace garnet
 {
@@ -87,6 +88,8 @@ class GarnetNetwork : public Network
 
     // Internal configuration
     bool isVNetOrdered(int vnet) const { return m_ordered[vnet]; }
+    bool requestVCAllowed(int vnet, int offset, int count, int dest) const;
+    bool sameRequestVCClass(int vnet, int a, int b, int count) const;
     VNET_type
     get_vnet_type(int vnet)
     {
@@ -95,6 +98,18 @@ class GarnetNetwork : public Network
     int getNumRouters();
     int get_router_id(int ni, int vnet);
 
+
+    bool directReductionEnabled() const { return m_direct_reduction; }
+    unsigned directBytes() const { return m_direct_bytes; }
+    unsigned directLatency() const { return m_direct_latency; }
+    // Returns 1 for a local command, 2 for its completion, 0 for normal NoC.
+    int directReductionKind(const Message *msg, NodeID source, int vnet);
+    NetworkInterface *directPeer(NodeID global) {
+        return m_nis.at(getLocalNodeID(global));
+    }
+    statistics::Scalar directCommands, directAcks, directCommandBytes;
+    statistics::Scalar directAckBytes, directBeats, directDelivered;
+    statistics::Scalar directCreditWait, directReceiveBlocked, directMaxPending;
 
     // Methods used by Topology to setup the network
     void makeExtOutLink(SwitchID src, NodeID dest, BasicLink* link,
@@ -106,14 +121,18 @@ class GarnetNetwork : public Network
                           PortDirection src_outport_dirn,
                           PortDirection dest_inport_dirn);
 
-    bool functionalRead(Packet *pkt, WriteMask &mask);
+    bool functionalRead(Packet *pkt) override;
+    bool functionalRead(Packet *pkt, WriteMask &mask) override;
     //! Function for performing a functional write. The return value
     //! indicates the number of messages that were written.
-    uint32_t functionalWrite(Packet *pkt);
+    uint32_t functionalWrite(Packet *pkt) override;
 
     // Stats
     void collateStats();
     void regStats();
+    void profileMessage(const Message *msg, const RouteInfo &route,
+                        int flits, int bytes, bool received = false,
+                        Tick network = 0, Tick queue = 0);
     void resetStats();
     void print(std::ostream& out) const;
 
@@ -170,6 +189,14 @@ class GarnetNetwork : public Network
 
     // Statistical variables
     statistics::Vector m_packets_received;
+    bool m_message_profile = false;
+    bool m_request_vc_partition = false;
+    bool m_direct_reduction = false;
+    unsigned m_direct_bytes = 16, m_direct_latency = 2;
+    int m_profile_types = 1;
+    statistics::Vector m_message_packets, m_message_flits, m_message_bytes;
+    statistics::Vector m_message_received, m_message_network_ticks;
+    statistics::Vector m_message_queue_ticks;
     statistics::Vector m_packets_injected;
     statistics::Vector m_packet_network_latency;
     statistics::Vector m_packet_queueing_latency;
@@ -196,6 +223,8 @@ class GarnetNetwork : public Network
     statistics::Scalar m_total_int_link_utilization;
     statistics::Scalar m_average_link_utilization;
     statistics::Vector m_average_vc_load;
+    statistics::Vector m_link_flits;
+    statistics::Vector m_link_utilization;
 
     statistics::Scalar  m_total_hops;
     statistics::Formula m_avg_hops;

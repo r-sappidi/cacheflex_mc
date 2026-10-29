@@ -42,6 +42,7 @@
 
 #include "base/trace.hh"
 #include "debug/RubyCache.hh"
+#include "debug/CacheFlexResidency.hh"
 
 namespace gem5
 {
@@ -74,6 +75,11 @@ AbstractCacheEntry::getPermission() const
 void
 AbstractCacheEntry::changePermission(AccessPermission new_perm)
 {
+    DPRINTFR(CacheFlexResidency,
+             "%llu: CFRES STATE entry=%p addr=%#x old=%s permission=%s\n",
+             curTick(), this, m_Address,
+             AccessPermission_to_string(m_Permission),
+             AccessPermission_to_string(new_perm));
     m_Permission = new_perm;
     if ((new_perm == AccessPermission_Invalid) ||
         (new_perm == AccessPermission_NotPresent)) {

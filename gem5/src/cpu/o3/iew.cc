@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2013, 2018-2019, 2025 Arm Limited
+ * Copyright (c) 2010-2013, 2018-2019 ARM Limited
  * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved.
  *
@@ -46,7 +46,6 @@
 #include "cpu/o3/iew.hh"
 
 #include <queue>
-#include <string>
 
 #include "cpu/checker/cpu.hh"
 #include "cpu/o3/dyn_inst.hh"
@@ -56,6 +55,7 @@
 #include "debug/Activity.hh"
 #include "debug/Drain.hh"
 #include "debug/IEW.hh"
+#include "debug/O3PipeView.hh"
 #include "params/BaseO3CPU.hh"
 
 namespace gem5
@@ -64,56 +64,12 @@ namespace gem5
 namespace o3
 {
 
-namespace
-{
-
-bool
-startsWith(const std::string &s, const char *prefix)
-{
-    return s.rfind(prefix, 0) == 0;
-}
-
-bool
-isSpmLoadInst(const DynInstPtr &inst)
-{
-    return inst->isSPMMem() && inst->isLoad();
-}
-
-bool
-isSpmStoreInst(const DynInstPtr &inst)
-{
-    return inst->isSPMMem() && inst->isStore() &&
-        (startsWith(inst->staticInst->getName(), "spm.st") ||
-         startsWith(inst->staticInst->getName(), "spmstr"));
-}
-
-bool
-isSpmBridgeInst(const DynInstPtr &inst)
-{
-    if (!inst->isSPMMem())
-        return false;
-    const std::string name = inst->staticInst->getName();
-    return startsWith(name, "spmcp") || startsWith(name, "spmwb");
-}
-
-} // anonymous namespace
-
-// clang-format off
-std::string IEW::IEWStats::statusStrings[ThreadStatusMax] = {
-    "running",
-    "blocked",
-    "idle",
-    "startSquash",
-    "squashing",
-    "unblocking",
-};
-// clang-format on
-
 IEW::IEW(CPU *_cpu, const BaseO3CPUParams &params)
     : issueToExecQueue(params.backComSize, params.forwardComSize),
       cpu(_cpu),
       instQueue(_cpu, this, params),
       ldstQueue(_cpu, this, params),
+      fuPool(params.fuPool),
       commitToIEWDelay(params.commitToIEWDelay),
       renameToIEWDelay(params.renameToIEWDelay),
       issueToExecuteDelay(params.issueToExecuteDelay),
@@ -147,9 +103,6 @@ IEW::IEW(CPU *_cpu, const BaseO3CPUParams &params)
 
     // Instruction queue needs the queue between issue and execute.
     instQueue.setIssueToExecuteQueue(&issueToExecQueue);
-
-    // Retrieve a list of all available FU pools
-    fuPools = instQueue.allFUPools();
 
     for (ThreadID tid = 0; tid < MaxThreads; tid++) {
         dispatchStatus[tid] = Running;
@@ -190,66 +143,55 @@ IEW::regProbePoints()
 
 IEW::IEWStats::IEWStats(CPU *cpu)
     : statistics::Group(cpu, "iew"),
-      ADD_STAT(dispatchStatus, statistics::units::Cycle::get(),
-               "Dispatch status cycles"),
-      ADD_STAT(execStatus, statistics::units::Cycle::get(),
-               "Number of cycles IEW is blocking"),
-      ADD_STAT(dispatchedInsts, statistics::units::Count::get(),
-               "Number of instructions dispatched to IQ"),
-      ADD_STAT(dispSquashedInsts, statistics::units::Count::get(),
-               "Number of squashed instructions skipped by dispatch"),
-      ADD_STAT(dispLoadInsts, statistics::units::Count::get(),
-               "Number of dispatched load instructions"),
-      ADD_STAT(dispStoreInsts, statistics::units::Count::get(),
-               "Number of dispatched store instructions"),
-      ADD_STAT(dispNonSpecInsts, statistics::units::Count::get(),
-               "Number of dispatched non-speculative instructions"),
-      ADD_STAT(iqFullEvents, statistics::units::Count::get(),
-               "Number of times the IQ has become full, causing a stall"),
-      ADD_STAT(lsqFullEvents, statistics::units::Count::get(),
-               "Number of times the LSQ has become full, causing a stall"),
-      ADD_STAT(spmLsqFullEvents, statistics::units::Count::get(),
-               "Number of times the SPM LSQ has become full, causing a stall"),
-      ADD_STAT(memOrderViolationEvents, statistics::units::Count::get(),
-               "Number of memory order violations"),
-      ADD_STAT(predictedTakenIncorrect, statistics::units::Count::get(),
-               "Number of branches that were predicted taken incorrectly"),
-      ADD_STAT(predictedNotTakenIncorrect, statistics::units::Count::get(),
-               "Number of branches that were predicted not taken incorrectly"),
-      ADD_STAT(branchMispredicts, statistics::units::Count::get(),
-               "Number of branch mispredicts detected at execute",
-               predictedTakenIncorrect + predictedNotTakenIncorrect),
-      executedInstStats(cpu),
-      ADD_STAT(instsToCommit, statistics::units::Count::get(),
-               "Cumulative count of insts sent to commit"),
-      ADD_STAT(writebackCount, statistics::units::Count::get(),
-               "Cumulative count of insts written-back"),
-      ADD_STAT(producerInst, statistics::units::Count::get(),
-               "Number of instructions producing a value"),
-      ADD_STAT(consumerInst, statistics::units::Count::get(),
-               "Number of instructions consuming a value"),
-      ADD_STAT(wbRate,
-               statistics::units::Rate<statistics::units::Count,
-                                       statistics::units::Cycle>::get(),
-               "Insts written-back per cycle"),
-      ADD_STAT(wbFanout,
-               statistics::units::Rate<statistics::units::Count,
-                                       statistics::units::Count>::get(),
-               "Average fanout of values written-back")
+    ADD_STAT(idleCycles, statistics::units::Cycle::get(),
+             "Number of cycles IEW is idle"),
+    ADD_STAT(squashCycles, statistics::units::Cycle::get(),
+             "Number of cycles IEW is squashing"),
+    ADD_STAT(blockCycles, statistics::units::Cycle::get(),
+             "Number of cycles IEW is blocking"),
+    ADD_STAT(unblockCycles, statistics::units::Cycle::get(),
+             "Number of cycles IEW is unblocking"),
+    ADD_STAT(dispatchedInsts, statistics::units::Count::get(),
+             "Number of instructions dispatched to IQ"),
+    ADD_STAT(dispSquashedInsts, statistics::units::Count::get(),
+             "Number of squashed instructions skipped by dispatch"),
+    ADD_STAT(dispLoadInsts, statistics::units::Count::get(),
+             "Number of dispatched load instructions"),
+    ADD_STAT(dispStoreInsts, statistics::units::Count::get(),
+             "Number of dispatched store instructions"),
+    ADD_STAT(dispNonSpecInsts, statistics::units::Count::get(),
+             "Number of dispatched non-speculative instructions"),
+    ADD_STAT(iqFullEvents, statistics::units::Count::get(),
+             "Number of times the IQ has become full, causing a stall"),
+    ADD_STAT(lsqFullEvents, statistics::units::Count::get(),
+             "Number of times the LSQ has become full, causing a stall"),
+    ADD_STAT(spmLsqFullEvents, statistics::units::Count::get(),
+             "Number of times the SPM LSQ has become full, causing a stall"),
+    ADD_STAT(memOrderViolationEvents, statistics::units::Count::get(),
+             "Number of memory order violations"),
+    ADD_STAT(predictedTakenIncorrect, statistics::units::Count::get(),
+             "Number of branches that were predicted taken incorrectly"),
+    ADD_STAT(predictedNotTakenIncorrect, statistics::units::Count::get(),
+             "Number of branches that were predicted not taken incorrectly"),
+    ADD_STAT(branchMispredicts, statistics::units::Count::get(),
+             "Number of branch mispredicts detected at execute",
+             predictedTakenIncorrect + predictedNotTakenIncorrect),
+    executedInstStats(cpu),
+    ADD_STAT(instsToCommit, statistics::units::Count::get(),
+             "Cumulative count of insts sent to commit"),
+    ADD_STAT(writebackCount, statistics::units::Count::get(),
+             "Cumulative count of insts written-back"),
+    ADD_STAT(producerInst, statistics::units::Count::get(),
+             "Number of instructions producing a value"),
+    ADD_STAT(consumerInst, statistics::units::Count::get(),
+             "Number of instructions consuming a value"),
+    ADD_STAT(wbRate, statistics::units::Rate<
+                statistics::units::Count, statistics::units::Cycle>::get(),
+             "Insts written-back per cycle"),
+    ADD_STAT(wbFanout, statistics::units::Rate<
+                statistics::units::Count, statistics::units::Count>::get(),
+             "Average fanout of values written-back")
 {
-    dispatchStatus.init(ThreadStatusMax)
-        .flags(statistics::pdf | statistics::nozero);
-    execStatus.init(ThreadStatusMax)
-        .flags(statistics::pdf | statistics::nozero);
-    for (int i = 0; i < ThreadStatusMax; ++i) {
-        dispatchStatus.subname(i, statusStrings[i]);
-        dispatchStatus.subdesc(i, "Number of cycles dispatch is " +
-                                      statusStrings[i]);
-        execStatus.subname(i, statusStrings[i]);
-        execStatus.subdesc(i,
-                           "Number of cycles dispatch is " + statusStrings[i]);
-    }
-
     instsToCommit
         .init(cpu->numThreads)
         .flags(statistics::total);
@@ -320,36 +262,6 @@ IEW::clearStates(ThreadID tid)
     toRename->iewInfo[tid].usedLSQ = true;
     toRename->iewInfo[tid].freeLQEntries = ldstQueue.numFreeLoadEntries(tid);
     toRename->iewInfo[tid].freeSQEntries = ldstQueue.numFreeStoreEntries(tid);
-
-    // Clear out any of this thread's instructions being sent to commit.
-    for (int i = -cpu->iewQueue.getPast();
-         i <= cpu->iewQueue.getFuture(); ++i) {
-        IEWStruct& iew_struct = cpu->iewQueue[i];
-        removeCommThreadInsts(tid, iew_struct);
-        iew_struct.mispredictInst[tid] = nullptr;
-        iew_struct.mispredPC[tid] = 0;
-        iew_struct.squashedSeqNum[tid] = 0;
-        iew_struct.pc[tid] = nullptr;
-        iew_struct.squash[tid] = false;
-        iew_struct.branchMispredict[tid] = false;
-        iew_struct.branchTaken[tid] = false;
-        iew_struct.includeSquashInst[tid] = false;
-    }
-
-    // Clear out any of this thread's instructions being sent from
-    // issue to execute.
-    for (int i = -issueToExecQueue.getPast();
-         i <= issueToExecQueue.getFuture(); ++i)
-        removeCommThreadInsts(tid, issueToExecQueue[i]);
-
-    // Clear out any of this thread's instructions being sent to prior stages.
-    for (int i = -cpu->timeBuffer.getPast();
-         i <= cpu->timeBuffer.getFuture(); ++i) {
-        TimeStruct& time_struct = cpu->timeBuffer[i];
-        time_struct.iewInfo[tid] = {};
-        time_struct.iewBlock[tid] = false;
-        time_struct.iewUnblock[tid] = false;
-    }
 }
 
 void
@@ -422,12 +334,9 @@ IEW::isDrained() const
     // Also check the FU pool as instructions are "stored" in FU
     // completion events until they are done and not accounted for
     // above
-    for (FUPool *fu_pool : fuPools) {
-        if (!fu_pool->isDrained()) {
-            DPRINTF(Drain, "FU pool still busy.\n");
-            drained = false;
-            break;
-        }
+    if (drained && !fuPool->isDrained()) {
+        DPRINTF(Drain, "FU pool still busy.\n");
+        drained = false;
     }
 
     return drained;
@@ -452,9 +361,7 @@ IEW::takeOverFrom()
 
     instQueue.takeOverFrom();
     ldstQueue.takeOverFrom();
-    for (FUPool *fu_pool : fuPools) {
-        fu_pool->takeOverFrom();
-    }
+    fuPool->takeOverFrom();
 
     startupStage();
     cpu->activityThisCycle();
@@ -615,12 +522,6 @@ IEW::blockMemInst(const DynInstPtr& inst)
 }
 
 void
-IEW::retryMemInst(const DynInstPtr& inst)
-{
-    instQueue.retryMemInst(inst);
-}
-
-void
 IEW::cacheUnblocked()
 {
     instQueue.cacheUnblocked();
@@ -680,7 +581,11 @@ IEW::skidCount()
 {
     int max=0;
 
-    for (ThreadID tid : *activeThreads) {
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
         unsigned thread_count = skidBuffer[tid].size();
         if (max < thread_count)
             max = thread_count;
@@ -692,7 +597,12 @@ IEW::skidCount()
 bool
 IEW::skidsEmpty()
 {
-    for (ThreadID tid : *activeThreads) {
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         if (!skidBuffer[tid].empty())
             return false;
     }
@@ -705,7 +615,12 @@ IEW::updateStatus()
 {
     bool any_unblocking = false;
 
-    for (ThreadID tid : *activeThreads) {
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
         if (dispatchStatus[tid] == Unblocking) {
             any_unblocking = true;
             break;
@@ -884,7 +799,13 @@ IEW::dispatch(ThreadID tid)
     //     buffer any instructions coming from rename
     //     continue trying to empty skid buffer
     //     check if stall conditions have passed
-    iewStats.dispatchStatus[dispatchStatus[tid]]++;
+
+    if (dispatchStatus[tid] == Blocked) {
+        ++iewStats.blockCycles;
+
+    } else if (dispatchStatus[tid] == Squashing) {
+        ++iewStats.squashCycles;
+    }
 
     // Dispatch should try to dispatch as many instructions as its bandwidth
     // will allow, as long as it is not currently blocked.
@@ -903,6 +824,8 @@ IEW::dispatch(ThreadID tid)
         // buffer were used.  Remove those instructions and handle
         // the rest of unblocking.
         dispatchInsts(tid);
+
+        ++iewStats.unblockCycles;
 
         if (fromRename->size != 0) {
             // Add the current inputs to the skid buffer so they can be
@@ -976,7 +899,7 @@ IEW::dispatchInsts(ThreadID tid)
         }
 
         // Check for full conditions.
-        if (instQueue.isFull(inst)) {
+        if (instQueue.isFull(tid)) {
             DPRINTF(IEW, "[tid:%i] Issue: IQ has become full.\n", tid);
 
             // Call function to start blocking.
@@ -990,24 +913,21 @@ IEW::dispatchInsts(ThreadID tid)
             ++iewStats.iqFullEvents;
             break;
         }
+        //jq86
+        // Check LSQ if inst is LD/ST — separate regular vs SPM LSQ full
+        bool spmLsqFull =
+            ( (inst->memReqFlags & Request::SPM_STORE) && ldstQueue.spmSqFull(tid)) ||
+            ( (inst->memReqFlags & Request::SPM_LOAD)  && ldstQueue.spmLqFull(tid)) ||
+            ( (inst->memReqFlags & Request::CP_TO_SPM) && ldstQueue.spmSqFull(tid)) ||
+            ( (inst->memReqFlags & Request::SPM_WRITEBACK) && ldstQueue.spmSqFull(tid));
+        bool regLsqFull =
+            (inst->isAtomic() && !(inst->memReqFlags & Request::SPM_STORE) && ldstQueue.sqFull(tid)) ||
+            (inst->isLoad()   && !(inst->memReqFlags & Request::SPM_LOAD)  && ldstQueue.lqFull(tid)) ||
+            (inst->isStore()  && !(inst->memReqFlags & Request::SPM_STORE) && ldstQueue.sqFull(tid));
 
-        const bool spm_load = isSpmLoadInst(inst);
-        const bool spm_store = isSpmStoreInst(inst);
-        const bool spm_bridge = isSpmBridgeInst(inst);
-
-        const bool spm_lsq_full =
-            (spm_load && ldstQueue.spmLqFull(tid)) ||
-            ((spm_store || spm_bridge) && ldstQueue.spmSqFull(tid));
-        const bool regular_lsq_full =
-            (inst->isAtomic() && ldstQueue.sqFull(tid)) ||
-            (inst->isLoad() && !spm_load && ldstQueue.lqFull(tid)) ||
-            (inst->isStore() && !spm_store && ldstQueue.sqFull(tid));
-
-        // Check LSQ if inst is LD/ST.
-        if (spm_lsq_full || regular_lsq_full) {
+        if (spmLsqFull || regLsqFull) {
             DPRINTF(IEW, "[tid:%i] Issue: %s has become full.\n",tid,
-                    spm_lsq_full ? "SPM LSQ" :
-                    (inst->isLoad() ? "LQ" : "SQ"));
+                    inst->isLoad() ? "LQ" : "SQ");
 
             // Call function to start blocking.
             block(tid);
@@ -1017,11 +937,10 @@ IEW::dispatchInsts(ThreadID tid)
             // get full in the IQ.
             toRename->iewUnblock[tid] = false;
 
-            if (spm_lsq_full) {
+            if (spmLsqFull)
                 ++iewStats.spmLsqFullEvents;
-            } else {
+            else
                 ++iewStats.lsqFullEvents;
-            }
             break;
         }
 
@@ -1144,8 +1063,9 @@ IEW::dispatchInsts(ThreadID tid)
 
         ++iewStats.dispatchedInsts;
 
+#if TRACING_ON
         inst->dispatchTick = curTick() - inst->fetchTick;
-
+#endif
         ppDispatch->notify(inst);
     }
 
@@ -1192,7 +1112,11 @@ IEW::executeInsts()
     wbNumInst = 0;
     wbCycle = 0;
 
-    for (ThreadID tid : *activeThreads) {
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
         fetchRedirect[tid] = false;
     }
 
@@ -1491,14 +1415,17 @@ IEW::tick()
 
     sortInsts();
 
-    for (FUPool *fu_pool : fuPools) {
-        // Free function units marked as being freed this cycle.
-        fu_pool->processFreeUnits();
-    }
+    // Free function units marked as being freed this cycle.
+    fuPool->processFreeUnits();
+
+    std::list<ThreadID>::iterator threads = activeThreads->begin();
+    std::list<ThreadID>::iterator end = activeThreads->end();
 
     // Check stall and squash signals, dispatch any instructions.
-    for (ThreadID tid : *activeThreads) {
-        DPRINTF(IEW,"Issue: Processing [tid:%i]\n", tid);
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
+        DPRINTF(IEW,"Issue: Processing [tid:%i]\n",tid);
 
         checkSignalsAndUpdate(tid);
         dispatch(tid);
@@ -1535,8 +1462,12 @@ IEW::tick()
     // or store to commit.  Also check if it's being told to execute a
     // nonspeculative instruction.
     // This is pretty inefficient...
-    for (ThreadID tid : *activeThreads) {
-        DPRINTF(IEW,"Processing [tid:%i]\n", tid);
+
+    threads = activeThreads->begin();
+    while (threads != end) {
+        ThreadID tid = (*threads++);
+
+        DPRINTF(IEW,"Processing [tid:%i]\n",tid);
 
         // Update structures based on instructions committed.
         if (fromCommit->commitInfo[tid].doneSeqNum != 0 &&
@@ -1587,8 +1518,7 @@ IEW::tick()
                 tid, toRename->iewInfo[tid].dispatched);
     }
 
-    DPRINTF(IEW,
-            "IQ has %i free entries (Can schedule: %i).  "
+    DPRINTF(IEW, "IQ has %i free entries (Can schedule: %i).  "
             "LQ has %i free entries. SQ has %i free entries.\n",
             instQueue.numFreeEntries(), instQueue.hasReadyInsts(),
             ldstQueue.numFreeLoadEntries(), ldstQueue.numFreeStoreEntries());
@@ -1608,22 +1538,11 @@ IEW::updateExeInstStats(const DynInstPtr& inst)
 
     cpu->executeStats[tid]->numInsts++;
 
-    inst->completeTick = curTick() - inst->fetchTick;
-
-    //
-    // ALU Operations
-    //
-    if (inst->isInteger()) {
-        cpu->executeStats[tid]->numIntAluAccesses++;
+#if TRACING_ON
+    if (debug::O3PipeView) {
+        inst->completeTick = curTick() - inst->fetchTick;
     }
-
-    if (inst->isFloating()) {
-        cpu->executeStats[tid]->numFpAluAccesses++;
-    }
-
-    if (inst->isVector()) {
-        cpu->executeStats[tid]->numVecAluAccesses++;
-    }
+#endif
 
     //
     //  Control operations

@@ -101,6 +101,47 @@ TEST_F(TreePLRUVictimizationTestF, GetVictimNoReset)
     ASSERT_EQ(rp->getVictim(candidates), &entries[0]);
 }
 
+TEST_F(TreePLRUVictimizationTestF, FilteredPhysicalWays)
+{
+    // Every nonempty subset, after touching each physical way. Probing must
+    // not mutate the policy; if the normal victim remains eligible, use it.
+    for (unsigned touch = 0; touch < entries.size(); ++touch) {
+        rp->touch(entries[touch].replacementData);
+        auto* original = rp->getVictim(candidates);
+        for (unsigned mask = 1; mask < (1u << entries.size()); ++mask) {
+            gem5::ReplacementCandidates subset;
+            bool contains_original = false;
+            for (unsigned i = 0; i < entries.size(); ++i) {
+                if (mask & (1u << i)) {
+                    subset.push_back(&entries[i]);
+                    contains_original |= &entries[i] == original;
+                }
+            }
+            auto* victim = rp->getVictim(subset);
+            bool found = false;
+            for (auto* candidate : subset) found |= candidate == victim;
+            ASSERT_TRUE(found);
+            if (contains_original) ASSERT_EQ(victim, original);
+            ASSERT_EQ(rp->getVictim(candidates), original);
+        }
+    }
+}
+
+class SixteenLeafTreePLRUTestF : public TreePLRUVictimizationTestF
+{
+  public:
+    SixteenLeafTreePLRUTestF() : TreePLRUVictimizationTestF(16) {}
+};
+
+TEST_F(SixteenLeafTreePLRUTestF, FourClaimedWaysDoNotCompactTreeIndices)
+{
+    gem5::ReplacementCandidates subset(candidates.begin() + 4, candidates.end());
+    for (unsigned target = 4; target < 16; ++target) {
+        rp->invalidate(entries[target].replacementData);
+        ASSERT_EQ(rp->getVictim(subset), &entries[target]);
+    }
+}
+
 /// Test that when all entries are invalid the first candidate will always be
 /// selected, regardless of the order of the invalidations.
 TEST_F(TreePLRUVictimizationTestF, GetVictimAllInvalid)

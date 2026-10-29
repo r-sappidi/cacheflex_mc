@@ -52,6 +52,7 @@ python_class_map = {
     "std::string": "String",
     "bool": "Bool",
     "CacheMemory": "RubyCache",
+    "MicroResourcePool": "MicroResourcePool",
     "WireBuffer": "RubyWireBuffer",
     "Sequencer": "RubySequencer",
     "HTMSequencer": "RubyHTMSequencer",
@@ -1655,6 +1656,8 @@ ${ident}_Controller::wakeup()
 #include "base/logging.hh"
 #include "base/trace.hh"
 #include "debug/ProtocolTrace.hh"
+#include "debug/CacheFlexTiming.hh"
+#include "mem/ruby/network/CacheFlexAggregate.hh"
 #include "debug/RubyGenerated.hh"
 #include "mem/ruby/protocol/${gen_filename}_Controller.hh"
 #include "mem/ruby/protocol/${gen_filename}_Event.hh"
@@ -1715,6 +1718,11 @@ ${ident}_Controller::doTransition(${ident}_Event event,
             """
 ${ident}_State next_state = state;
 
+if (flightRecorderEnabled())
+    recordFlightTransition(${ident}_Event_to_string(event),
+        ${ident}_State_to_string(state), ${ident}_State_to_string(state),
+        addr, "begin");
+
 DPRINTF(RubyGenerated, "%s, Time: %lld, state: %s, event: %s, addr: %#x\\n",
         *this, curCycle(), ${ident}_State_to_string(state),
         ${ident}_Event_to_string(event), addr);
@@ -1741,6 +1749,19 @@ TransitionResult result =
 
         code(
             """
+
+if (flightRecorderEnabled())
+    recordFlightTransition(${ident}_Event_to_string(event),
+        ${ident}_State_to_string(state), ${ident}_State_to_string(next_state),
+        addr, result == TransitionResult_Valid ? "valid" :
+              result == TransitionResult_ResourceStall ? "resource_stall" :
+              "protocol_stall");
+
+if (cfAggregateEnabled())
+    cfAggregateTransition("${ident}", m_version, addr,
+        ${ident}_Event_to_string(event), ${ident}_State_to_string(state),
+        ${ident}_State_to_string(next_state),
+        result == TransitionResult_Valid ? 0 : 1);
 
 if (result == TransitionResult_Valid) {
     DPRINTF(RubyGenerated, "next_state: %s\\n",
@@ -1866,8 +1887,12 @@ ${ident}_Controller::doTransitionWorker(${ident}_Event event,
             res = trans.resources
             for key, val in res.items():
                 val = f"""
-if (!{key.code}.areNSlotsAvailable({val}, clockEdge()))
+if (!{key.code}.areNSlotsAvailable({val}, clockEdge())) {{
+    if (cfAggregateEnabled())
+        cfAggregateResource("{ident}", m_version, addr, "{key.code}", {ident}_Event_to_string(event));
+    DPRINTF(CacheFlexTiming, "CFT CTRL_RESOURCE_BLOCK addr=%#x resource={key.code} state=%d event=%d\\n", addr, state, event);
     return TransitionResult_ResourceStall;
+}}
 """
                 case_sorter.append(val)
 

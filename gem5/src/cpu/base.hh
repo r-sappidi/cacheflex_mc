@@ -243,6 +243,7 @@ class BaseCPU : public ClockedObject
 
     inline void workItemBegin() { baseStats.numWorkItemsStarted++; }
     inline void workItemEnd() { baseStats.numWorkItemsCompleted++; }
+
     // @todo remove me after debugging with legion done
     Tick instCount() { return instCnt; }
 

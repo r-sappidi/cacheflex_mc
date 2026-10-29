@@ -46,6 +46,7 @@
 #include "mem/ruby/system/RubySystem.hh"
 #include "mem/ruby/system/Sequencer.hh"
 #include "sim/system.hh"
+#include "base/output.hh"
 
 namespace gem5
 {
@@ -68,6 +69,12 @@ AbstractController::AbstractController(const Params &p)
       mRetryRespEvent{*this, false},
       stats(this)
 {
+    if (p.flight_recorder_entries) {
+        flightRecorder = std::make_unique<FlightRecorder>(
+            simout.directory() + "/" + name() + ".flight.bin",
+            p.flight_recorder_entries);
+        flightMessages = p.flight_recorder_messages;
+    }
     if (m_version == 0) {
         // Combine the statistics from all controllers
         // of this particular type.

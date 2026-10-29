@@ -47,6 +47,8 @@
 #include "base/random.hh"
 #include "base/stl_helpers.hh"
 #include "debug/RubyQueue.hh"
+#include "mem/ruby/network/CacheFlexTiming.hh"
+#include "mem/ruby/network/IngressBypass.hh"
 
 namespace gem5
 {
@@ -58,11 +60,14 @@ using stl_helpers::operator<<;
 
 MessageBuffer::MessageBuffer(const Params &p)
     : SimObject(p), m_stall_map_size(0), m_max_size(p.buffer_size),
-    m_max_dequeue_rate(p.max_dequeue_rate), m_dequeues_this_cy(0),
+    m_max_dequeue_rate(p.max_dequeue_rate),
+    m_ingress_lookahead(p.cacheflex_ingress_lookahead),
+    m_copy_demand_bypass(p.cacheflex_copy_demand_bypass), m_dequeues_this_cy(0),
     m_time_last_time_size_checked(0),
     m_time_last_time_enqueue(0), m_time_last_time_pop(0),
     m_last_arrival_time(0), m_last_message_strict_fifo_bypassed(false),
     m_strict_fifo(p.ordered),
+    m_clamp_fifo_arrival(p.clamp_fifo_arrival),
     m_randomization(p.randomization),
     m_allow_zero_latency(p.allow_zero_latency),
     m_routing_priority(p.routing_priority),
@@ -82,7 +87,17 @@ MessageBuffer::MessageBuffer(const Params &p)
              "Average stall ticks per message"),
     ADD_STAT(m_occupancy, statistics::units::Rate<
                 statistics::units::Ratio, statistics::units::Tick>::get(),
-             "Average occupancy of buffer capacity")
+             "Average occupancy of buffer capacity"),
+    ADD_STAT(m_ingressBypassSelections, statistics::units::Count::get(),
+             "Younger ingress candidates selected after a stalled transition"),
+    ADD_STAT(m_ingressBypassDequeues, statistics::units::Count::get(),
+             "Selected younger requests successfully consumed"),
+    ADD_STAT(m_ingressBypassStalls, statistics::units::Count::get(),
+             "Selected younger requests moved into a protocol stall map"),
+    ADD_STAT(m_ingressBypassDependencyRejects, statistics::units::Count::get(),
+             "Candidate checks rejected to preserve ordering"),
+    ADD_STAT(m_ingressBypassNoCandidate, statistics::units::Count::get(),
+             "Stall-handler visits without another safe ready candidate")
 {
     m_msg_counter = 0;
     m_consumer = NULL;
@@ -100,6 +115,11 @@ MessageBuffer::MessageBuffer(const Params &p)
     m_stall_time = 0;
 
     m_dequeue_callback = nullptr;
+    fatal_if((m_ingress_lookahead || m_copy_demand_bypass) &&
+             (m_strict_fifo || name().find("mandatoryQueue") == std::string::npos),
+             "Ingress bypass is only supported on unordered L0 mandatoryQueue");
+    fatal_if(m_ingress_lookahead && m_copy_demand_bypass,
+             "Select either age-window bypass or copy/demand isolation");
 
     // stats
     m_not_avail_count
@@ -194,11 +214,115 @@ const Message*
 MessageBuffer::peek() const
 {
     DPRINTF(RubyQueue, "Peeking at head of queue.\n");
-    const Message* msg_ptr = m_prio_heap.front().get();
+    const Message* msg_ptr = peekMsgPtr().get();
     assert(msg_ptr);
 
     DPRINTF(RubyQueue, "Message: %s\n", (*msg_ptr));
     return msg_ptr;
+}
+
+void
+MessageBuffer::removeSelected()
+{
+    const MsgPtr selected = peekMsgPtr();
+    if (selected == m_prio_heap.front()) {
+        pop_heap(m_prio_heap.begin(), m_prio_heap.end(), std::greater<MsgPtr>());
+        m_prio_heap.pop_back();
+    } else {
+        auto it = std::find(m_prio_heap.begin(), m_prio_heap.end(), selected);
+        panic_if(it == m_prio_heap.end(), "Selected ingress message disappeared");
+        m_prio_heap.erase(it);
+        make_heap(m_prio_heap.begin(), m_prio_heap.end(), std::greater<MsgPtr>());
+    }
+    m_bypass_selected.reset();
+}
+
+namespace {
+IngressRequestKey ingressKey(const MsgPtr &message)
+{
+    IngressRequestKey k;
+    auto *r = dynamic_cast<const RubyRequest*>(message.get());
+    if (!r || !r->m_pkt || r->m_htmFromTransaction || r->m_isTlbi ||
+        r->m_pkt->req->isUncacheable() || r->m_pkt->req->isStrictlyOrdered() ||
+        r->m_pkt->isLLSC() || r->m_pkt->isAtomicOp()) return k;
+    k.copy = r->m_Type == RubyRequestType_SPMCP_fetch;
+    k.reorderable = r->m_Type == RubyRequestType_LD ||
+        r->m_Type == RubyRequestType_IFETCH ||
+        (k.copy && !r->m_SPMMulticastClaim && !r->m_SPMMulticastMask &&
+         !r->m_pkt->req->isSPMCPBatch3() && !r->m_pkt->req->isSPMDma2D() &&
+         r->m_Size <= 64);
+    k.coherentLine = r->m_LineAddress;
+    k.spmLine = r->m_DstSPMAddr & ~Addr(63);
+    return k;
+}
+}
+
+bool
+MessageBuffer::tryIngressBypass(Tick current_time)
+{
+    if ((!m_ingress_lookahead && !m_copy_demand_bypass) ||
+        m_prio_heap.empty()) return false;
+    // Only isolate demands from a plain-copy backlog, never prioritize them
+    // around an ordinary coherent head. Cache-only control is an exact no-op.
+    if (m_copy_demand_bypass &&
+        !ingressCopyHead(ingressKey(m_prio_heap.front()))) return false;
+    // A fresh cycle starts at the oldest request. Failed lookahead probes are
+    // charged by SLICC's existing stall-handler path against transitions/cycle.
+    if (m_bypass_tick != current_time) {
+        m_bypass_selected.reset();
+        m_bypass_attempted.clear();
+        m_bypass_tick = current_time;
+    }
+    MsgPtr failed = peekMsgPtr();
+    if (std::find(m_bypass_attempted.begin(), m_bypass_attempted.end(), failed) ==
+        m_bypass_attempted.end()) m_bypass_attempted.push_back(failed);
+    m_bypass_selected.reset();
+    const unsigned max_probes = m_copy_demand_bypass ? 4 : m_ingress_lookahead;
+    if (m_bypass_attempted.size() > max_probes) {
+        ++m_ingressBypassNoCandidate; return false;
+    }
+    // Observe a bounded age window without removing any blocked message from
+    // the queue, changing its timestamp, or making capacity appear available.
+    // Sensitivity intervention: existing admitted storage is searchable, so a
+    // fifty-copy prefix does not hide an unrelated L1 hit. There is no new
+    // request/data queue. Search circuit latency/area are not modeled; this is
+    // not an RTL claim. Every selected request still passes normal SLICC checks
+    // and each probe consumes the existing controller transition budget.
+    const size_t span = m_copy_demand_bypass ? m_prio_heap.size() :
+        std::min<size_t>(m_prio_heap.size(), m_ingress_lookahead + 1);
+    std::vector<MsgPtr> window(span);
+    std::partial_sort_copy(m_prio_heap.begin(), m_prio_heap.end(),
+        window.begin(), window.end(),
+        [](const MsgPtr &a,const MsgPtr &b) { return b > a; });
+    for (size_t i=1; i<window.size(); ++i) {
+        const auto &candidate=window[i];
+        if (candidate->getLastEnqueueTime() > current_time) break;
+        if (std::find(m_bypass_attempted.begin(),m_bypass_attempted.end(),candidate)
+            != m_bypass_attempted.end()) continue;
+        const auto key=ingressKey(candidate);
+        if (m_copy_demand_bypass && !ingressDemandCandidate(key)) continue;
+        bool safe=key.reorderable;
+        for (size_t j=0; safe && j<i; ++j)
+            safe=ingressIndependent(key,ingressKey(window[j]));
+        // Requests removed into the protocol stall map must not be forgotten.
+        // Conservatively consider all of them older when checking dependencies.
+        for (const auto &[addr,list]:m_stall_msg_map)
+            for (const auto &older:list)
+                if (!ingressIndependent(key,ingressKey(older))) safe=false;
+        if (!safe) {++m_ingressBypassDependencyRejects;continue;}
+        // Charge successful as well as failed demand selections to the
+        // four-probe budget. Legacy age-window behavior is left unchanged.
+        if (m_copy_demand_bypass) m_bypass_attempted.push_back(candidate);
+        m_bypass_selected=candidate;
+        CFT_MSG("DEMAND_BYPASS_SELECT", candidate.get(),
+                "copy_isolation=%d older=%u attempts=%u",
+                m_copy_demand_bypass, unsigned(i),
+                unsigned(m_bypass_attempted.size()));
+        ++m_ingressBypassSelections;
+        return true;
+    }
+    ++m_ingressBypassNoCandidate;
+    return false;
 }
 
 // FIXME - move me somewhere else
@@ -255,6 +379,15 @@ MessageBuffer::enqueue(MsgPtr message, Tick current_time, Tick delta,
 
     // Check the arrival time
     assert(arrival_time >= current_time);
+    // Diagnostic mixed service latencies must not reorder an ordered link.
+    // A faster request waits for older messages; the sequence counter used
+    // by the heap also preserves enqueue order for equal arrival times.
+    // The default still diagnoses illegal schedules with the original panic.
+    if (m_clamp_fifo_arrival && m_strict_fifo &&
+        !(bypassStrictFIFO || m_last_message_strict_fifo_bypassed) &&
+        arrival_time < m_last_arrival_time) {
+        arrival_time = m_last_arrival_time;
+    }
     if (m_strict_fifo &&
         !(bypassStrictFIFO || m_last_message_strict_fifo_bypassed)) {
         if (arrival_time < m_last_arrival_time) {
@@ -282,6 +415,7 @@ MessageBuffer::enqueue(MsgPtr message, Tick current_time, Tick delta,
     msg_ptr->updateDelayedTicks(current_time);
     msg_ptr->setLastEnqueueTime(arrival_time);
     msg_ptr->setMsgCounter(m_msg_counter);
+    CFT_MSG("QUEUE_ENQUEUE", msg_ptr, "ready=%llu delta=%llu", arrival_time, delta);
 
     // Insert the message into the priority heap
     m_prio_heap.push_back(message);
@@ -308,7 +442,9 @@ MessageBuffer::dequeue(Tick current_time, bool decrement_messages)
     assert(isReady(current_time));
 
     // get MsgPtr of the message about to be dequeued
-    MsgPtr message = m_prio_heap.front();
+    MsgPtr message = peekMsgPtr();
+    CFT_MSG("QUEUE_DEQUEUE", message.get(), "ready=%llu final=%d",
+            message->getLastEnqueueTime(), decrement_messages);
 
     // get the delay cycles
     message->updateDelayedTicks(current_time);
@@ -324,8 +460,12 @@ MessageBuffer::dequeue(Tick current_time, bool decrement_messages)
     }
     ++m_dequeues_this_cy;
 
-    pop_heap(m_prio_heap.begin(), m_prio_heap.end(), std::greater<MsgPtr>());
-    m_prio_heap.pop_back();
+    const bool bypassed = message != m_prio_heap.front();
+    if (bypassed) {
+        if (decrement_messages) ++m_ingressBypassDequeues;
+        else ++m_ingressBypassStalls;
+    }
+    removeSelected();
     if (decrement_messages) {
         // Record how much time is passed since the message was enqueued
         m_stall_time += curTick() - message->getLastEnqueueTime();
@@ -359,6 +499,8 @@ MessageBuffer::unregisterDequeueCallback()
 void
 MessageBuffer::clear()
 {
+    m_bypass_selected.reset();
+    m_bypass_attempted.clear();
     m_prio_heap.clear();
 
     m_msg_counter = 0;
@@ -374,13 +516,14 @@ MessageBuffer::recycle(Tick current_time, Tick recycle_latency)
 {
     DPRINTF(RubyQueue, "Recycling.\n");
     assert(isReady(current_time));
-    MsgPtr node = m_prio_heap.front();
-    pop_heap(m_prio_heap.begin(), m_prio_heap.end(), std::greater<MsgPtr>());
+    MsgPtr node = peekMsgPtr();
+    removeSelected();
 
     Tick future_time = current_time + recycle_latency;
+    CFT_MSG("QUEUE_RECYCLE", node.get(), "ready=%llu", future_time);
     node->setLastEnqueueTime(future_time);
 
-    m_prio_heap.back() = node;
+    m_prio_heap.push_back(node);
     push_heap(m_prio_heap.begin(), m_prio_heap.end(), std::greater<MsgPtr>());
     m_consumer->scheduleEventAbsolute(future_time);
 }
@@ -390,6 +533,7 @@ MessageBuffer::reanalyzeList(std::list<MsgPtr> &lt, Tick schdTick)
 {
     while (!lt.empty()) {
         MsgPtr m = lt.front();
+        CFT_MSG("QUEUE_REANALYZE", m.get(), "ready=%llu", schdTick);
         assert(m->getLastEnqueueTime() <= schdTick);
 
         m_prio_heap.push_back(m);
@@ -448,7 +592,7 @@ MessageBuffer::stallMessage(Addr addr, Tick current_time)
 {
     DPRINTF(RubyQueue, "Stalling due to %#x\n", addr);
     assert(isReady(current_time));
-    MsgPtr message = m_prio_heap.front();
+    MsgPtr message = peekMsgPtr();
 
     // Since the message will just be moved to stall map, indicate that the
     // buffer should not decrement the m_buf_msgs statistic
@@ -522,7 +666,7 @@ MessageBuffer::isReady(Tick current_time) const
                        (m_time_last_time_pop < current_time) ||
                        (m_dequeues_this_cy < m_max_dequeue_rate);
     bool is_ready = (m_prio_heap.size() > 0) &&
-                   (m_prio_heap.front()->getLastEnqueueTime() <= current_time);
+                   (peekMsgPtr()->getLastEnqueueTime() <= current_time);
     if (!can_dequeue && is_ready) {
         // Make sure the Consumer executes next cycle to dequeue the ready msg
         m_consumer->scheduleEvent(Cycles(1));

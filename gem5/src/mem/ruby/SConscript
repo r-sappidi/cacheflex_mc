@@ -53,6 +53,7 @@ if not env['CONF']['RUBY']:
     Return()
 
 DebugFlag('ProtocolTrace')
+DebugFlag('CacheFlexTiming')
 DebugFlag('RubyCache')
 DebugFlag('RubyCacheTrace')
 DebugFlag('RubyDma')
@@ -114,6 +115,7 @@ MakeInclude('structures/PersistentTable.hh')
 MakeInclude('structures/RubyPrefetcher.hh')
 MakeInclude('structures/RubyPrefetcherProxy.hh')
 MakeInclude('structures/TBEStorage.hh')
+MakeInclude('structures/MicroResourcePool.hh')
 if env['CONF']['RUBY_PROTOCOL_CHI']:
     MakeInclude('structures/MN_TBEStorage.hh')
     MakeInclude('structures/MN_TBETable.hh')

@@ -86,6 +86,16 @@ flitBuffer::setMaxSize(int maximum)
 }
 
 bool
+flitBuffer::functionalRead(Packet *pkt)
+{
+    for (auto *flt : m_buffer) {
+        if (flt->functionalRead(pkt))
+            return true;
+    }
+    return false;
+}
+
+bool
 flitBuffer::functionalRead(Packet *pkt, WriteMask &mask)
 {
     bool read = false;

@@ -63,6 +63,8 @@ RubyRequest::print(std::ostream& out) const
   out << std::hex << "SrcAddr = 0x" << m_SrcAddr << " "; // C6
   out << "DstSPMAddr = 0x" << m_DstSPMAddr << std::dec << " "; // C6
   out << "SPMSet = " << m_SPMSet << " "; // C6
+  out << "SPMMulticastMask = " << m_SPMMulticastMask << " ";
+  out << "SPMMulticastClaim = " << m_SPMMulticastClaim << " ";
   out << "SPMWay = " << m_SPMWay << " "; // C6
   out << "Prefetch = " << m_Prefetch << " ";
   out << "isGLCSet = " << m_isGLCSet << "";

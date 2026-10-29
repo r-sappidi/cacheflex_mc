@@ -40,11 +40,21 @@
 
 machine(MachineType:L0Cache, "MESI Directory L0 Cache")
  : Sequencer * sequencer;
+   MicroResourcePool * dataMissCredits;
+   MicroResourcePool * instMissCredits;
+   MicroResourcePool * writeCredits;
+   MicroResourcePool * downstreamMissCredits;
+   MicroResourcePool * downstreamWriteCredits;
+   MessageBuffer * microSpmQueue;
+   MessageBuffer * microSpmToL1, network="To";
    CacheMemory * Icache;
    CacheMemory * Dcache;
    Cycles request_latency := 2;
    Cycles response_latency := 2;
    Cycles spm_request_latency := 2;
+   // Opt-in causal diagnostics; zero inherits the original shared latency.
+   Cycles spm_load_request_latency := 0;
+   Cycles spm_copy_request_latency := 0;
    Cycles llsc_lock_timeout_latency := 16;
    bool use_llsc_lock := "True";
    bool send_evictions;
@@ -54,6 +64,8 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
 
    // From this node's L0 cache to the network
    MessageBuffer * bufferToL1, network="To";
+   // Alias bufferToL1 in legacy configs; finite profile wires a distinct lane.
+   MessageBuffer * replyToL1, network="To";
 
    // To this node's L0 cache FROM the network
    MessageBuffer * bufferFromL1, network="From";
@@ -170,6 +182,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
     // the sequencer when L1 returns SPM_DATA/SPM_ACK.
     SPMCP_fetch, desc="Forward SPM copy request to private L1";
     SPMCP_install, desc="Forward SPM slot install request to private L1";
+    MicroSPM, desc="Independent SPM ingress adapter";
     SPMLD, desc="Forward SPM load request to private L1";
     SPMST, desc="Forward SPM store request to private L1";
     SPMWB_read, desc="Forward SPM writeback read request to private L1";
@@ -371,14 +384,21 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   }
 
   out_port(requestNetwork_out, CoherenceMsg, bufferToL1);
+  out_port(replyNetwork_out, CoherenceMsg, replyToL1);
+  out_port(microSpm_out, CoherenceMsg, microSpmToL1);
   out_port(optionalQueue_out, RubyRequest, prefetchQueue);
 
   void enqueuePrefetch(Addr address, RubyRequestType type) {
-    enqueue(optionalQueue_out, RubyRequest, 1) {
-      out_msg.LineAddress := address;
-      out_msg.Type := type;
-      out_msg.Prefetch := PrefetchBit:Yes;
-      out_msg.AccessMode := RubyAccessMode:Supervisor;
+    // Prefetches are hints: drop them when the physical queue has no slot.
+    // Unlike action enqueues, this function is called by the prefetcher and
+    // does not get a transition-level SLICC resource check.
+    if (prefetchQueue.areNSlotsAvailable(1, clockEdge())) {
+      enqueue(optionalQueue_out, RubyRequest, 1) {
+        out_msg.LineAddress := address;
+        out_msg.Type := type;
+        out_msg.Prefetch := PrefetchBit:Yes;
+        out_msg.AccessMode := RubyAccessMode:Supervisor;
+      }
     }
   }
 
@@ -557,8 +577,22 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
     }
   }
 
+  in_port(microSpm_in, RubyRequest, microSpmQueue, rank = 5) {
+    if (microSpm_in.isReady(clockEdge())) {
+      peek(microSpm_in, RubyRequest) {
+        trigger(Event:MicroSPM, in_msg.LineAddress,
+                getCacheEntry(in_msg.LineAddress), TBEs[in_msg.LineAddress]);
+      }
+    }
+  }
+
   // Mandatory Queue betweens Node's CPU and it's L0 caches
-  in_port(mandatoryQueue_in, RubyRequest, mandatoryQueue, desc="...", rank = 0) {
+  bool tryIngressBypass() {
+    return mandatoryQueue.tryIngressBypass(clockEdge());
+  }
+
+  in_port(mandatoryQueue_in, RubyRequest, mandatoryQueue, desc="...", rank = 0,
+          rsc_stall_handler="tryIngressBypass", prot_stall_handler="tryIngressBypass") {
     if (mandatoryQueue_in.isReady(clockEdge())) {
       peek(mandatoryQueue_in, RubyRequest, block_on="LineAddress") {
 
@@ -567,7 +601,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
         if (in_msg.Type == RubyRequestType:SPMCP_fetch) {
           Addr spm_source_addr := makeLineAddress(in_msg.SrcAddr);
           Entry cache_entry := getDCacheEntry(spm_source_addr);
-          trigger(Event:SPMCP_fetch, spm_source_addr,
+          trigger(mandatory_request_type_to_event(in_msg.Type), spm_source_addr,
                   cache_entry, TBEs[spm_source_addr]);
         } else if (in_msg.Type == RubyRequestType:SPMCP_install ||
                    in_msg.Type == RubyRequestType:SPMLD ||
@@ -671,6 +705,8 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
 
   // ACTIONS
   action(a_issueGETS, "a", desc="Issue GETS") {
+    check_allocate(downstreamMissCredits);
+    check_allocate(downstreamWriteCredits);
     peek(mandatoryQueue_in, RubyRequest) {
       enqueue(requestNetwork_out, CoherenceMsg, request_latency) {
         out_msg.addr := address;
@@ -686,6 +722,8 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   }
 
   action(b_issueGETX, "b", desc="Issue GETX") {
+    check_allocate(downstreamMissCredits);
+    check_allocate(downstreamWriteCredits);
     peek(mandatoryQueue_in, RubyRequest) {
       enqueue(requestNetwork_out, CoherenceMsg, request_latency) {
         out_msg.addr := address;
@@ -703,6 +741,8 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   }
 
   action(c_issueUPGRADE, "c", desc="Issue GETX") {
+    check_allocate(downstreamMissCredits);
+    check_allocate(downstreamWriteCredits);
     peek(mandatoryQueue_in, RubyRequest) {
       enqueue(requestNetwork_out, CoherenceMsg, request_latency) {
         out_msg.addr := address;
@@ -718,9 +758,23 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
     }
   }
 
+  Cycles spmRequestLatency(RubyRequestType request_type) {
+    if (request_type == RubyRequestType:SPMLD &&
+        spm_load_request_latency > intToCycles(0)) {
+      return spm_load_request_latency;
+    }
+    if (request_type == RubyRequestType:SPMCP_fetch &&
+        spm_copy_request_latency > intToCycles(0)) {
+      return spm_copy_request_latency;
+    }
+    return spm_request_latency;
+  }
+
   action(spm_issueRequestToL1, "spmreq", desc="Forward SPM request to private L1") {
+    check_allocate(downstreamMissCredits);
+    check_allocate(downstreamWriteCredits);
     peek(mandatoryQueue_in, RubyRequest) {
-      enqueue(requestNetwork_out, CoherenceMsg, spm_request_latency) {
+      enqueue(requestNetwork_out, CoherenceMsg, spmRequestLatency(in_msg.Type)) {
         out_msg.addr := address;
         if (in_msg.Type == RubyRequestType:SPMCP_fetch) {
           out_msg.Class := CoherenceClass:SPMCP_FETCH;
@@ -742,14 +796,81 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
         out_msg.Sender := machineID;
         out_msg.Dest := createMachineID(MachineType:L1Cache, version);
         out_msg.SrcAddr := makeLineAddress(in_msg.SrcAddr);
+        out_msg.L3Finalize := in_msg.L3Finalize;
+        if (in_msg.Type == RubyRequestType:SPMST && bitSelect(in_msg.SrcAddr, 60, 60) == intToAddress(1)) {
+          out_msg.SrcAddr := in_msg.SrcAddr;
+        }
         out_msg.DstSPMAddr := makeLineAddress(in_msg.DstSPMAddr);
         out_msg.SPMSet := in_msg.SPMSet;
         out_msg.SPMWay := in_msg.SPMWay;
         out_msg.Len := in_msg.Size;
+        out_msg.MulticastMask := in_msg.SPMMulticastMask;
+        out_msg.MulticastClaim := in_msg.SPMMulticastClaim;
+        out_msg.AccessMode := in_msg.AccessMode;
+        out_msg.MessageSize := MessageSizeType:Control;
+        // Capture before the request leaves L0; no recall/invalidation is needed.
+        // A later snoop may change coherent state independently of this snapshot.
+        if (in_msg.Type == RubyRequestType:SPMCP_fetch && is_valid(cache_entry)) {
+          out_msg.SPMSnapshot := true;
+          out_msg.DataBlk := cache_entry.DataBlk;
+          out_msg.Dirty := cache_entry.Dirty;
+          out_msg.MessageSize := MessageSizeType:Data;
+        }
+
+        if (in_msg.Type == RubyRequestType:SPMST) {
+          out_msg.DataBlk := in_msg.WTData;
+          out_msg.SPMMasked := in_msg.SPMMasked;
+          if (in_msg.SPMMasked) {
+            out_msg.SPMWriteMask := in_msg.writeMask;
+          }
+          out_msg.MessageSize := MessageSizeType:Data;
+        }
+      }
+    }
+  }
+
+  action(micro_forwardSPM, "microspm", desc="Forward SPM request to private L1") {
+    peek(microSpm_in, RubyRequest) {
+      enqueue(microSpm_out, CoherenceMsg, spmRequestLatency(in_msg.Type)) {
+        out_msg.addr := address;
+        if (in_msg.Type == RubyRequestType:SPMCP_fetch) {
+          out_msg.Class := CoherenceClass:SPMCP_FETCH;
+        } else if (in_msg.Type == RubyRequestType:SPMCP_install) {
+          out_msg.Class := CoherenceClass:SPMCP_INSTALL;
+        } else if (in_msg.Type == RubyRequestType:SPMLD) {
+          out_msg.Class := CoherenceClass:SPM_LD;
+        } else if (in_msg.Type == RubyRequestType:SPMST) {
+          out_msg.Class := CoherenceClass:SPM_ST;
+        } else if (in_msg.Type == RubyRequestType:SPMWB_read) {
+          out_msg.Class := CoherenceClass:SPMWB_READ;
+        } else if (in_msg.Type == RubyRequestType:SPMWB_store) {
+          out_msg.Class := CoherenceClass:SPMWB_STORE;
+        } else if (in_msg.Type == RubyRequestType:SPM_release) {
+          out_msg.Class := CoherenceClass:SPM_RELEASE;
+        } else {
+          error("Invalid SPM RubyRequestType");
+        }
+        out_msg.Sender := machineID;
+        out_msg.Dest := createMachineID(MachineType:L1Cache, version);
+        out_msg.SrcAddr := makeLineAddress(in_msg.SrcAddr);
+        out_msg.L3Finalize := in_msg.L3Finalize;
+        if (in_msg.Type == RubyRequestType:SPMST && bitSelect(in_msg.SrcAddr, 60, 60) == intToAddress(1)) {
+          out_msg.SrcAddr := in_msg.SrcAddr;
+        }
+        out_msg.DstSPMAddr := makeLineAddress(in_msg.DstSPMAddr);
+        out_msg.SPMSet := in_msg.SPMSet;
+        out_msg.SPMWay := in_msg.SPMWay;
+        out_msg.Len := in_msg.Size;
+        out_msg.MulticastMask := in_msg.SPMMulticastMask;
+        out_msg.MulticastClaim := in_msg.SPMMulticastClaim;
         out_msg.AccessMode := in_msg.AccessMode;
         out_msg.MessageSize := MessageSizeType:Control;
         if (in_msg.Type == RubyRequestType:SPMST) {
           out_msg.DataBlk := in_msg.WTData;
+          out_msg.SPMMasked := in_msg.SPMMasked;
+          if (in_msg.SPMMasked) {
+            out_msg.SPMWriteMask := in_msg.writeMask;
+          }
           out_msg.MessageSize := MessageSizeType:Data;
         }
       }
@@ -799,7 +920,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   }
 
   action(f_sendDataToL1, "f", desc="Send data to the L1 cache") {
-    enqueue(requestNetwork_out, CoherenceMsg, response_latency) {
+    enqueue(replyNetwork_out, CoherenceMsg, response_latency) {
       assert(is_valid(cache_entry));
       out_msg.addr := address;
       out_msg.Class := CoherenceClass:INV_DATA;
@@ -814,7 +935,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
 
   action(fi_sendInvAck, "fi", desc="Send data to the L1 cache") {
     peek(messgeBuffer_in, CoherenceMsg) {
-      enqueue(requestNetwork_out, CoherenceMsg, response_latency) {
+      enqueue(replyNetwork_out, CoherenceMsg, response_latency) {
         out_msg.addr := address;
         out_msg.Class := CoherenceClass:INV_ACK;
         out_msg.Sender := machineID;
@@ -832,7 +953,12 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   }
 
   action(g_issuePUTX, "g", desc="Relinquish line to the L1 cache") {
-    enqueue(requestNetwork_out, CoherenceMsg, response_latency) {
+    check_allocate(writeCredits);
+    writeCredits.allocate(address);
+    // A subsequent recall can see I and return INV_ACK. Keep the earlier
+    // dirty eviction ordered before that ack, even with split ingress lanes.
+    // In legacy mode replyNetwork_out aliases the original request FIFO.
+    enqueue(replyNetwork_out, CoherenceMsg, response_latency) {
       assert(is_valid(cache_entry));
       out_msg.addr := address;
       out_msg.Class := CoherenceClass:PUTX;
@@ -972,6 +1098,8 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   }
 
   action(s_deallocateTBE, "s", desc="Deallocate TBE") {
+    dataMissCredits.release(address);
+    instMissCredits.release(address);
     TBEs.deallocate(address);
     unset_tbe();
   }
@@ -1140,12 +1268,37 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   // TRANSITIONS
   //*****************************************************
 
+  action(micro_popSPM, "microspop", desc="Consume independent SPM ingress") {
+    microSpm_in.dequeue(clockEdge());
+  }
+
+  transition({I,S,E,M,Inst_IS,IS,IM,SM,PF_Inst_IS,PF_IS,PF_IE,LLSC_E,LLSC_M,I_F,V_F}, MicroSPM) {
+    micro_forwardSPM;
+    micro_popSPM;
+  }
+
+  action(micro_dataMiss, "mdm", desc="MICRO L1D miss credit") {
+    check_allocate(dataMissCredits);
+    dataMissCredits.allocate(address);
+  }
+  action(micro_bridgeWrite, "mbw", desc="MICRO L1 bridge forwarding buffer") {
+    check_allocate(writeCredits);
+    writeCredits.allocate(address);
+  }
+  action(micro_instMiss, "mim", desc="MICRO L1I miss credit") {
+    check_allocate(instMissCredits);
+    instMissCredits.allocate(address);
+  }
+
   // Transitions for Load/Store/Replacement/WriteBack from transient states
   transition({Inst_IS, IS, IM, SM, I_F, V_F}, {Load, Ifetch, Store, L0_Replacement, Load_Linked}) {
     z_stallAndWaitMandatoryQueue;
   }
 
-  transition({Inst_IS, IS, IM, SM, I_F, V_F},
+  // A prefetch owns the coherent transaction until its response arrives.
+  // Retry SPM requests after completion, just as for demand-miss transients.
+  // Prefetch completion transitions already wake the mandatory queue.
+  transition({Inst_IS, IS, IM, SM, I_F, V_F, PF_Inst_IS, PF_IS, PF_IE},
              {SPMCP_fetch, SPMCP_install, SPMLD, SPMST, SPMWB_read,
               SPMWB_store, SPM_release}) {
     z_stallAndWaitMandatoryQueue;
@@ -1163,6 +1316,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   transition(I, Load, IS) {
     oo_allocateDCacheBlock;
     i_allocateTBE;
+    micro_dataMiss;
     a_issueGETS;
     uu_profileDataMiss;
     po_observeMiss;
@@ -1170,8 +1324,14 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   }
 
   transition({I, S, E, M, LLSC_E, LLSC_M},
-             {SPMCP_fetch, SPMCP_install, SPMLD, SPMST, SPMWB_read,
-              SPMWB_store, SPM_release}) {
+             {SPMCP_fetch, SPMWB_store}) {
+    micro_bridgeWrite;
+    spm_issueRequestToL1;
+    k_popMandatoryQueue;
+  }
+
+  transition({I, S, E, M, LLSC_E, LLSC_M},
+             {SPMCP_install, SPMLD, SPMST, SPMWB_read, SPM_release}) {
     spm_issueRequestToL1;
     k_popMandatoryQueue;
   }
@@ -1179,6 +1339,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   transition(I, Load_Linked, IS) {
     oo_allocateDCacheBlock;
     i_allocateTBE;
+    micro_dataMiss;
     ll_markLoadLinked;
     b_issueGETX;
     uu_profileDataMiss;
@@ -1189,6 +1350,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   transition(I, Ifetch, Inst_IS) {
     pp_allocateICacheBlock;
     i_allocateTBE;
+    micro_instMiss;
     a_issueGETS;
     uu_profileInstMiss;
     po_observeMiss;
@@ -1198,6 +1360,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   transition(I, Store, IM) {
     oo_allocateDCacheBlock;
     i_allocateTBE;
+    micro_dataMiss;
     b_issueGETX;
     uu_profileDataMiss;
     po_observeMiss;
@@ -1233,6 +1396,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
 
   transition(S, Store, SM) {
     i_allocateTBE;
+    micro_dataMiss;
     c_issueUPGRADE;
     uu_profileDataMiss;
     k_popMandatoryQueue;
@@ -1240,6 +1404,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
 
   transition(S, Load_Linked, SM) {
     i_allocateTBE;
+    micro_dataMiss;
     ll_markLoadLinked;
     c_issueUPGRADE;
     uu_profileDataMiss;
@@ -1427,6 +1592,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   transition(I, PF_Load, PF_IS) {
     oo_allocateDCacheBlock;
     i_allocateTBE;
+    micro_dataMiss;
     pa_issuePfGETS;
     pq_popPrefetchQueue;
   }
@@ -1440,6 +1606,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   transition(I, PF_Ifetch, PF_Inst_IS) {
     pp_allocateICacheBlock;
     i_allocateTBE;
+    micro_instMiss;
     pa_issuePfGETS;
     pq_popPrefetchQueue;
   }
@@ -1453,6 +1620,7 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
   transition(I, PF_Store, PF_IE) {
     oo_allocateDCacheBlock;
     i_allocateTBE;
+    micro_dataMiss;
     pb_issuePfGETX;
     pq_popPrefetchQueue;
   }
@@ -1509,6 +1677,18 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
     kd_wakeUpDependents;
   }
 
+  // A recall may invalidate a prefetched instruction while its fill is in
+  // flight. As with PF_IS, consume the stale response without retaining it.
+  // A promoted demand uses Inst_IS and its existing completion transition.
+  transition(PF_Inst_IS, Data_Stale, I) {
+    u_writeInstToCache;
+    s_deallocateTBE;
+    mp_markPrefetched;
+    ff_deallocateCacheBlock;
+    o_popIncomingResponseQueue;
+    kd_wakeUpDependents;
+  }
+
   transition(PF_IE, Data_Exclusive, E) {
     u_writeDataToCache;
     s_deallocateTBE;
@@ -1530,12 +1710,20 @@ machine(MachineType:L0Cache, "MESI Directory L0 Cache")
     k_popMandatoryQueue;
   }
 
-  transition({I, S, E, M, LLSC_E, LLSC_M}, SPM_Data) {
+  // The dedicated SPM response is independent of the coherent L0 state for
+  // the source address.  With a separately connected SPM CPU port it can
+  // legitimately return while an ordinary load/ifetch for that line is in a
+  // transient state.
+  transition({I, S, E, M, LLSC_E, LLSC_M,
+              Inst_IS, IS, IM, SM, PF_Inst_IS, PF_IS, PF_IE, I_F, V_F},
+             SPM_Data) {
     spm_dedicatedReadCallback;
     spm_popResponseQueue;
   }
 
-  transition({I, S, E, M, LLSC_E, LLSC_M}, SPM_Ack) {
+  transition({I, S, E, M, LLSC_E, LLSC_M,
+              Inst_IS, IS, IM, SM, PF_Inst_IS, PF_IS, PF_IE, I_F, V_F},
+             SPM_Ack) {
     spm_dedicatedWriteCallback;
     spm_popResponseQueue;
   }

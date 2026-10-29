@@ -38,6 +38,7 @@
 #include "base/compiler.hh"
 #include "base/trace.hh"
 #include "debug/MMU.hh"
+#include "debug/CacheFlexResidency.hh"
 #include "sim/faults.hh"
 #include "sim/serialize.hh"
 
@@ -52,6 +53,8 @@ EmulationPageTable::map(Addr vaddr, Addr paddr, int64_t size, uint64_t flags)
     assert(pageOffset(vaddr) == 0);
 
     DPRINTF(MMU, "Allocating Page: %#x-%#x\n", vaddr, vaddr + size);
+    DPRINTF(CacheFlexResidency, "CFRES MAP va=%#x pa=%#x bytes=%lld\n",
+            vaddr, paddr, size);
 
     while (size > 0) {
         auto it = pTable.find(vaddr);

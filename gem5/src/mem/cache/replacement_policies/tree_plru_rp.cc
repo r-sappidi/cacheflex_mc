@@ -177,6 +177,40 @@ TreePLRU::getVictim(const ReplacementCandidates& candidates) const
     const PLRUTree* tree = std::static_pointer_cast<TreePLRUReplData>(
             candidates[0]->replacementData)->tree.get();
 
+    // Scratchpad claims can exclude physical ways from a set. Tree leaves
+    // retain their physical indices: indexing a compacted candidate vector
+    // by a leaf number can select the wrong way or run past its end.
+    // Follow the same PLRU preferences, skipping only empty subtrees. Do not
+    // touch the tree while probing; the normal reset/touch updates it later.
+    if (candidates.size() < numLeaves) {
+        std::vector<ReplaceableEntry*> leaves(numLeaves, nullptr);
+        std::vector<bool> available(2 * numLeaves - 1, false);
+        for (auto* candidate : candidates) {
+            const auto data = std::static_pointer_cast<TreePLRUReplData>(
+                candidate->replacementData);
+            assert(data->tree.get() == tree);
+            assert(data->index >= numLeaves - 1 &&
+                   data->index < 2 * numLeaves - 1);
+            leaves[data->index - (numLeaves - 1)] = candidate;
+            uint64_t node = data->index;
+            available[node] = true;
+            while (node != 0) {
+                node = parentIndex(node);
+                available[node] = true;
+            }
+        }
+        uint64_t node = 0;
+        while (node < tree->size()) {
+            const auto left = leftSubtreeIndex(node);
+            const auto right = rightSubtreeIndex(node);
+            const auto preferred = tree->at(node) ? right : left;
+            node = available[preferred] ? preferred :
+                (preferred == right ? left : right);
+            assert(available[node]);
+        }
+        return leaves[node - (numLeaves - 1)];
+    }
+
     // Index of the tree entry we are currently checking. Start with root.
     uint64_t tree_index = 0;
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014,2017-2018,2020-2021,2025 Arm Limited
+ * Copyright (c) 2012-2014,2017-2018,2020-2021 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -47,6 +47,8 @@
 #include <map>
 #include <memory>
 #include <queue>
+#include <list>
+#include <unordered_map>
 
 #include "arch/generic/debugfaults.hh"
 #include "arch/generic/vec_reg.hh"
@@ -72,6 +74,34 @@ namespace o3
 {
 
 class IEW;
+
+//jq86
+class LSQUnit;
+
+// class SPMResponseHandler : public Packet::SenderState
+// {
+//   private:
+//     InstSeqNum seqNum;
+//     LSQUnit* lsqUnit;
+//     Addr spmAddr;
+//     ThreadID tid;
+//     bool isCopy;
+//     bool isWriteback;
+
+//   public:
+//     SPMResponseHandler(InstSeqNum sn, LSQUnit* unit, Addr addr,
+//                        ThreadID t, bool copy, bool wb)
+//       : seqNum(sn), lsqUnit(unit), spmAddr(addr),
+//         tid(t), isCopy(copy), isWriteback(wb)
+//     {}
+
+//     InstSeqNum getSeqNum()    const { return seqNum; }
+//     LSQUnit*   getLSQUnit()   const { return lsqUnit; }
+//     Addr       getSpmAddr()   const { return spmAddr; }
+//     ThreadID   getThreadID()  const { return tid; }
+//     bool       getIsCopy()    const { return isCopy; }
+//     bool       getIsWriteback() const { return isWriteback; }
+// };
 
 /**
  * Class that implements the actual LQ and SQ for each specific
@@ -165,6 +195,11 @@ class LSQUnit
 
       public:
         static constexpr size_t DataSize = sizeof(_data);
+        // Address-only metadata, bounded by this existing SQ entry's lifetime.
+        bool spmEarlyValid = false;
+        Addr spmEarlyAddr = 0;
+        unsigned spmEarlyBytes = 0;
+        Tick spmEarlyReady = 0;
         /** Constructs an empty store queue entry. */
         SQEntry()
         {
@@ -178,6 +213,10 @@ class LSQUnit
         {
             LSQEntry::clear();
             _canWB = _completed = _committed = _isAllZeros = false;
+            spmEarlyValid = false;
+            spmEarlyAddr = 0;
+            spmEarlyBytes = 0;
+            spmEarlyReady = 0;
         }
 
         /** Member accessors. */
@@ -203,6 +242,7 @@ class LSQUnit
         FullAddrRangeCoverage, /* One range fully covers another */
         NoAddrRangeCoverage /* Two ranges are disjoint */
     };
+
 
   public:
     using LoadQueue = CircularQueue<LQEntry>;
@@ -287,11 +327,7 @@ class LSQUnit
     /** Returns if there is a memory ordering violation. Value is reset upon
      * call to getMemDepViolator().
      */
-    bool
-    violation() const
-    {
-        return static_cast<bool>(memDepViolator);
-    }
+    bool violation() { return static_cast<bool>(memDepViolator); }
 
     /** Returns the memory ordering violator. */
     DynInstPtr getMemDepViolator();
@@ -307,16 +343,6 @@ class LSQUnit
 
     /** Returns the number of stores in the SQ. */
     int numStores() { return storeQueue.size(); }
-
-    /** Returns the current occupancy of the passed
-     * queue (store queue or load queue) */
-    template <typename Queue>
-    double
-    queueOccupancy(const Queue &queue) const
-    {
-        return static_cast<double>(queue.size()) /
-               static_cast<double>(queue.capacity());
-    }
 
     // hardware transactional memory
     int numHtmStarts() const { return htmStarts; }
@@ -341,16 +367,18 @@ class LSQUnit
     bool isEmpty() const { return lqEmpty() && sqEmpty(); }
 
     /** Returns if the LQ is full. */
-    bool lqFull() { return loadQueue.full(); }
+    bool lqFull() { return numFreeLoadEntries() == 0; }
 
     /** Returns if the SQ is full. */
-    bool sqFull() { return storeQueue.full(); }
+    bool sqFull() { return numFreeStoreEntries() == 0; }
 
     /** Returns if the LQ is empty. */
-    bool lqEmpty() const { return loadQueue.size() == 0; }
+    bool lqEmpty() const { return loadQueue.size() == 0 &&
+        (!boundedTracking || detachedLoads.empty()); }
 
     /** Returns if the SQ is empty. */
-    bool sqEmpty() const { return storeQueue.size() == 0; }
+    bool sqEmpty() const { return storeQueue.size() == 0 &&
+        (!boundedTracking || spmShadowTable.empty()); }
 
     /** Returns the number of instructions in the LSQ. */
     unsigned getCount() { return loadQueue.size() + storeQueue.size(); }
@@ -454,6 +482,70 @@ class LSQUnit
      * @param pkt Response packet from the memory sub-system
      */
     bool recvTimingResp(PacketPtr pkt);
+  
+
+  //jq86
+  public:
+    struct SpmShadowEntry
+    {
+        InstSeqNum seqNum;   // 对应 cp2spm 指令的序号 (also key in map)
+        Addr spmAddr;        // SPM 目标地址
+        Addr regularAddr = 0; // Physical coherent destination for SPMWB.
+        bool ready;          // DRAM fill done (SPMresp received)
+        bool retired;        // instruction committed
+        bool isCopy;
+        bool isWriteback;
+        unsigned wayCount;
+        bool addrValid;  // spmAddr known (set at write() time); false = dispatch reservation only
+        std::vector<gem5::o3::DynInstPtr> waitingLoads;
+        SpmShadowEntry() :
+            seqNum(0), spmAddr(0),
+            ready(false), retired(false),
+            isCopy(false), isWriteback(false), wayCount(1),
+            addrValid(false) {}
+    };
+    // With boundedTracking these share the physical SPM SQ entry budget.
+    std::unordered_map<InstSeqNum, SpmShadowEntry> spmShadowTable;
+    bool boundedTracking = false;
+    bool spmStoreForwarding = false;
+    bool spmEarlyAddress = false;
+    Tick nextSpmAddrIssue = 0;
+    bool earlySpmStoreRange(SQEntry &entry, Addr &addr, unsigned &bytes);
+    Cycles spmForwardLatency = Cycles(2);
+    // A squashed/prefetch-retired load retains its tracking credit until all
+    // accepted fragments return. These maps represent retained LQ metadata,
+    // not another allocation pool or additional data SRAM.
+    std::unordered_map<InstSeqNum, unsigned> outstandingLoadPackets;
+    std::unordered_map<InstSeqNum, bool> detachedLoads;
+    std::unordered_map<InstSeqNum, Tick> spmRawWaitStart;
+    std::unordered_map<InstSeqNum, Tick> spmLoadServiceStart;
+    std::list<PacketPtr> pendingSPMRetry;
+
+    // WAR shadow table: tracks RAW-blocked spm.ld1qd loads whose SPM addresses
+    // are known but whose SPMLoadReq has NOT yet been sent.  Used to defer
+    // cp2spm (CPTOSPMReq) that would overwrite the same SPM slot before the
+    // load's SPMLoadReq reaches the L2 cache (at which point the L2 serializes
+    // the two requests correctly on its own).
+    struct SpmPendingLoadEntry {
+        bool valid     = false;
+        InstSeqNum seqNum  = 0;
+        int  slot      = 0;   // SPM slot index
+        int  start_way = 0;   // first way covered by this load
+        int  end_way   = 0;   // last  way covered by this load
+    };
+    std::vector<SpmPendingLoadEntry> spmPendingLoadTable;
+
+  public:
+
+    bool isSpmLsq = false;
+    void reserveSpmStore(const DynInstPtr& inst, bool addr_known = true,
+                         Addr regular_addr = 0);
+    bool hasPendingWriteback() const;
+    void markShadowReady(InstSeqNum seq);
+    void retireShadow(InstSeqNum seq);
+    void cleanupRetiredShadow();
+    DynInstPtr findInstBySeqNum(InstSeqNum seqNum) const;
+
 
   private:
     /** The LSQUnit thread id. */
@@ -464,8 +556,6 @@ class LSQUnit
 
     /** The load queue. */
     LoadQueue loadQueue;
-
-    bool isSpmLsq = false;
 
   private:
     /** The number of places to shift addresses in the LSQ before checking
@@ -531,6 +621,11 @@ class LSQUnit
 
         /** Total number of loads forwaded from LSQ stores. */
         statistics::Scalar forwLoads;
+        statistics::Scalar spmForwardedBytes;
+        statistics::Scalar spmEarlyAddrIssued;
+        statistics::Scalar spmEarlyAddrDisjoint;
+        statistics::Scalar spmEarlyAddrOverlap;
+        statistics::Scalar spmEarlyAddrBusy;
 
         /** Total number of squashed loads. */
         statistics::Scalar squashedLoads;
@@ -550,18 +645,26 @@ class LSQUnit
 
         /** Number of times the LSQ is blocked due to the cache. */
         statistics::Scalar blockedByCache;
+        statistics::Scalar reductionIsolatedRejects;
+        statistics::Scalar coherentSentWhileReductionBlocked;
+
+        statistics::Scalar spmRawBlockEvents;
+        statistics::Scalar spmRawBlockedUniqueLoads;
+        statistics::Scalar spmRawWaitCycles;
+        statistics::Scalar spmUnresolvedAddrRetries;
+        statistics::Scalar spmPortBlockedEvents;
+        statistics::Scalar spmLoadResponses;
+        statistics::Scalar boundedShadowAllocations;
+        statistics::Scalar boundedShadowReleases;
+        statistics::Scalar boundedDetachedLoads;
+        statistics::Scalar boundedDetachedReleases;
+        statistics::Scalar boundedMaxLoadOccupancy;
+        statistics::Scalar boundedMaxStoreOccupancy;
+        statistics::Scalar spmLoadServiceCycles;
 
         /** Distribution of cycle latency between the first time a load
          * is issued and its completion */
         statistics::Distribution loadToUse;
-
-        /** Total number of loads and stores written to the load store queue */
-        statistics::Scalar addedLoadsAndStores;
-
-        /** LQ Occupancy */
-        statistics::Average lqAvgOccupancy;
-        /** SQ Occupancy */
-        statistics::Average sqAvgOccupancy;
     } stats;
 
   public:

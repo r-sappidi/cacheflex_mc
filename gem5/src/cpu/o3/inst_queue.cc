@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014, 2017-2020, 2025 Arm Limited
+ * Copyright (c) 2011-2014, 2017-2020 ARM Limited
  * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved.
  *
@@ -49,9 +49,9 @@
 #include "cpu/o3/fu_pool.hh"
 #include "cpu/o3/limits.hh"
 #include "debug/IQ.hh"
+#include "debug/CacheFlexDeps.hh"
 #include "enums/OpClass.hh"
 #include "params/BaseO3CPU.hh"
-#include "params/IQUnit.hh"
 #include "sim/core.hh"
 
 // clang complains about std::set being overloaded with Packet::set if
@@ -64,152 +64,17 @@ namespace gem5
 namespace o3
 {
 
-IQUnit::IQUnit(const IQUnitParams &params)
-    : SimObject(params),
-      iqPolicy(params.smtIQPolicy),
-      numThreads(params.numThreads),
-      activeThreads(nullptr),
-      _freeEntries(params.numEntries),
-      _numEntries(params.numEntries),
-      _fuPool(params.fuPool)
-{
-    assert(_fuPool);
-    // Figure out resource sharing policy
-    if (iqPolicy == SMTQueuePolicy::Dynamic) {
-        // Set Max Entries to Total IQs Capacity
-        for (ThreadID tid = 0; tid < numThreads; tid++) {
-            maxEntries[tid] = _numEntries;
-        }
-
-    } else if (iqPolicy == SMTQueuePolicy::Partitioned) {
-        //@todo:make work if part_amt doesnt divide evenly.
-        int part_amt = _numEntries / numThreads;
-
-        // Divide ROB up evenly
-        for (ThreadID tid = 0; tid < numThreads; tid++) {
-            maxEntries[tid] = part_amt;
-        }
-
-        DPRINTF(IQ,
-                "IQ sharing policy set to Partitioned:"
-                "%i entries per thread.\n",
-                part_amt);
-    } else if (iqPolicy == SMTQueuePolicy::Threshold) {
-        double threshold = (double)params.smtIQThreshold / 100;
-
-        int thresholdIQ = (int)((double)threshold * _numEntries);
-
-        // Divide up by threshold amount
-        for (ThreadID tid = 0; tid < numThreads; tid++) {
-            maxEntries[tid] = thresholdIQ;
-        }
-
-        DPRINTF(IQ,
-                "IQ sharing policy set to Threshold:"
-                "%i entries per thread.\n",
-                thresholdIQ);
-    }
-
-    for (ThreadID tid = numThreads; tid < MaxThreads; tid++) {
-        maxEntries[tid] = 0;
-    }
-}
-
-void
-IQUnit::insert(const DynInstPtr &inst)
-{
-    assert(_freeEntries != 0);
-    _freeEntries--;
-
-    inst->setInIQ(this);
-
-    count[inst->threadNumber]++;
-}
-
-void
-IQUnit::remove(const DynInstPtr &inst)
-{
-    _freeEntries++;
-    assert(_freeEntries <= _numEntries);
-
-    count[inst->threadNumber]--;
-}
-
-void
-IQUnit::setActiveThreads(list<ThreadID> *at_ptr)
-{
-    activeThreads = at_ptr;
-}
-
-void
-IQUnit::resetState()
-{
-    _freeEntries = _numEntries;
-    for (ThreadID tid = 0; tid < numThreads; ++tid) {
-        count[tid] = 0;
-    }
-}
-
-void
-IQUnit::resetEntries()
-{
-    if (iqPolicy != SMTQueuePolicy::Dynamic || numThreads > 1) {
-        int active_threads = activeThreads->size();
-
-        for (ThreadID tid : *activeThreads) {
-            if (iqPolicy == SMTQueuePolicy::Partitioned) {
-                maxEntries[tid] = _numEntries / active_threads;
-            } else if (iqPolicy == SMTQueuePolicy::Threshold &&
-                       active_threads == 1) {
-                maxEntries[tid] = _numEntries;
-            }
-        }
-    }
-}
-
-int
-IQUnit::entryAmount(ThreadID num_threads)
-{
-    if (iqPolicy == SMTQueuePolicy::Partitioned) {
-        return _numEntries / num_threads;
-    } else {
-        return 0;
-    }
-}
-
-unsigned
-IQUnit::numFreeEntries(const DynInstPtr &inst) const
-{
-    const ThreadID tid = inst->threadNumber;
-    const OpClass op_class = inst->opClass();
-    // Return 0 if the IQ cannot accept the specific op class
-    if (op_class != No_OpClass && !_fuPool->isCapable(op_class)) {
-        return 0;
-    } else {
-        return numFreeEntries(tid);
-    }
-}
-
 InstructionQueue::FUCompletion::FUCompletion(const DynInstPtr &_inst,
-                                             FUPool *fu_pool, int fu_idx,
-                                             InstructionQueue *iq_ptr)
+    int fu_idx, InstructionQueue *iq_ptr)
     : Event(Stat_Event_Pri, AutoDelete),
-      inst(_inst),
-      fuPool(fu_pool),
-      fuIdx(fu_idx),
-      iqPtr(iq_ptr),
-      freeFU(false)
+      inst(_inst), fuIdx(fu_idx), iqPtr(iq_ptr), freeFU(false)
 {
 }
 
 void
 InstructionQueue::FUCompletion::process()
 {
-    if (freeFU) {
-        iqPtr->processFUCompletion(inst, fuPool, fuIdx);
-    } else {
-        iqPtr->processFUCompletion(inst, nullptr, -1);
-    }
+    iqPtr->processFUCompletion(inst, freeFU ? fuIdx : -1);
     inst = NULL;
 }
 
@@ -221,26 +86,31 @@ InstructionQueue::FUCompletion::description() const
 }
 
 InstructionQueue::InstructionQueue(CPU *cpu_ptr, IEW *iew_ptr,
-                                   const BaseO3CPUParams &params)
+        const BaseO3CPUParams &params)
     : cpu(cpu_ptr),
       iewStage(iew_ptr),
-      iqs(params.instQueues),
+      fuPool(params.fuPool),
+      iqPolicy(params.smtIQPolicy),
       numThreads(params.numThreads),
+      numEntries(params.numIQEntries),
       totalWidth(params.issueWidth),
       commitToIEWDelay(params.commitToIEWDelay),
       iqStats(cpu, totalWidth),
       iqIOStats(cpu)
 {
+    assert(fuPool);
+
     const auto &reg_classes = params.isa[0]->regClasses();
     // Set the number of total physical registers
     // As the vector registers have two addressing modes, they are added twice
-    numPhysRegs =
-        params.numPhysIntRegs + params.numPhysFloatRegs +
-        params.numPhysVecRegs +
-        params.numPhysVecRegs * (reg_classes.at(VecElemClass)->numRegs() /
-                                 reg_classes.at(VecRegClass)->numRegs()) +
-        params.numPhysVecPredRegs + params.numPhysMatRegs +
-        params.numPhysCCRegs + reg_classes.at(MiscRegClass)->numRegs();
+    numPhysRegs = params.numPhysIntRegs + params.numPhysFloatRegs +
+                    params.numPhysVecRegs +
+                    params.numPhysVecRegs * (
+                            reg_classes.at(VecElemClass)->numRegs() /
+                            reg_classes.at(VecRegClass)->numRegs()) +
+                    params.numPhysVecPredRegs +
+                    params.numPhysMatRegs +
+                    params.numPhysCCRegs;
 
     //Create an entry for each physical register within the
     //dependency graph.
@@ -256,6 +126,41 @@ InstructionQueue::InstructionQueue(CPU *cpu_ptr, IEW *iew_ptr,
     }
 
     resetState();
+
+    //Figure out resource sharing policy
+    if (iqPolicy == SMTQueuePolicy::Dynamic) {
+        //Set Max Entries to Total ROB Capacity
+        for (ThreadID tid = 0; tid < numThreads; tid++) {
+            maxEntries[tid] = numEntries;
+        }
+
+    } else if (iqPolicy == SMTQueuePolicy::Partitioned) {
+        //@todo:make work if part_amt doesnt divide evenly.
+        int part_amt = numEntries / numThreads;
+
+        //Divide ROB up evenly
+        for (ThreadID tid = 0; tid < numThreads; tid++) {
+            maxEntries[tid] = part_amt;
+        }
+
+        DPRINTF(IQ, "IQ sharing policy set to Partitioned:"
+                "%i entries per thread.\n",part_amt);
+    } else if (iqPolicy == SMTQueuePolicy::Threshold) {
+        double threshold =  (double)params.smtIQThreshold / 100;
+
+        int thresholdIQ = (int)((double)threshold * numEntries);
+
+        //Divide up by threshold amount
+        for (ThreadID tid = 0; tid < numThreads; tid++) {
+            maxEntries[tid] = thresholdIQ;
+        }
+
+        DPRINTF(IQ, "IQ sharing policy set to Threshold:"
+                "%i entries per thread.\n",thresholdIQ);
+   }
+    for (ThreadID tid = numThreads; tid < MaxThreads; tid++) {
+        maxEntries[tid] = 0;
+    }
 }
 
 InstructionQueue::~InstructionQueue()
@@ -275,48 +180,45 @@ InstructionQueue::name() const
 
 InstructionQueue::IQStats::IQStats(CPU *cpu, const unsigned &total_width)
     : statistics::Group(cpu),
-      ADD_STAT(instsAdded, statistics::units::Count::get(),
-               "Number of instructions added to the IQ (excludes non-spec)"),
-      ADD_STAT(nonSpecInstsAdded, statistics::units::Count::get(),
-               "Number of non-speculative instructions added to the IQ"),
-      ADD_STAT(instsIssued, statistics::units::Count::get(),
-               "Number of instructions issued"),
-      ADD_STAT(intInstsIssued, statistics::units::Count::get(),
-               "Number of integer instructions issued"),
-      ADD_STAT(floatInstsIssued, statistics::units::Count::get(),
-               "Number of float instructions issued"),
-      ADD_STAT(branchInstsIssued, statistics::units::Count::get(),
-               "Number of branch instructions issued"),
-      ADD_STAT(memInstsIssued, statistics::units::Count::get(),
-               "Number of memory instructions issued"),
-      ADD_STAT(miscInstsIssued, statistics::units::Count::get(),
-               "Number of miscellaneous instructions issued"),
-      ADD_STAT(squashedInstsIssued, statistics::units::Count::get(),
-               "Number of squashed instructions issued"),
-      ADD_STAT(squashedInstsExamined, statistics::units::Count::get(),
-               "Number of squashed instructions iterated over during squash; "
-               "mainly for profiling"),
-      ADD_STAT(squashedOperandsExamined, statistics::units::Count::get(),
-               "Number of squashed operands that are examined and possibly "
-               "removed from graph"),
-      ADD_STAT(squashedNonSpecRemoved, statistics::units::Count::get(),
-               "Number of squashed non-spec instructions that were removed"),
-      ADD_STAT(numIssuedDist, statistics::units::Count::get(),
-               "Number of insts issued each cycle"),
-      ADD_STAT(statFuBusy, statistics::units::Count::get(),
-               "attempts to use FU when none available"),
-      ADD_STAT(issuedInstType, statistics::units::Count::get(),
-               "Number of instructions issued per FU type, per thread"),
-      ADD_STAT(issueRate,
-               statistics::units::Rate<statistics::units::Count,
-                                       statistics::units::Cycle>::get(),
-               "Inst issue rate", instsIssued / cpu->baseStats.numCycles),
-      ADD_STAT(fuBusy, statistics::units::Count::get(),
-               "FU busy when requested"),
-      ADD_STAT(fuBusyRate,
-               statistics::units::Rate<statistics::units::Count,
-                                       statistics::units::Count>::get(),
-               "FU busy rate (busy events/executed inst)")
+    ADD_STAT(instsAdded, statistics::units::Count::get(),
+             "Number of instructions added to the IQ (excludes non-spec)"),
+    ADD_STAT(nonSpecInstsAdded, statistics::units::Count::get(),
+             "Number of non-speculative instructions added to the IQ"),
+    ADD_STAT(instsIssued, statistics::units::Count::get(),
+             "Number of instructions issued"),
+    ADD_STAT(intInstsIssued, statistics::units::Count::get(),
+             "Number of integer instructions issued"),
+    ADD_STAT(floatInstsIssued, statistics::units::Count::get(),
+             "Number of float instructions issued"),
+    ADD_STAT(branchInstsIssued, statistics::units::Count::get(),
+             "Number of branch instructions issued"),
+    ADD_STAT(memInstsIssued, statistics::units::Count::get(),
+             "Number of memory instructions issued"),
+    ADD_STAT(miscInstsIssued, statistics::units::Count::get(),
+             "Number of miscellaneous instructions issued"),
+    ADD_STAT(squashedInstsIssued, statistics::units::Count::get(),
+             "Number of squashed instructions issued"),
+    ADD_STAT(squashedInstsExamined, statistics::units::Count::get(),
+             "Number of squashed instructions iterated over during squash; "
+             "mainly for profiling"),
+    ADD_STAT(squashedOperandsExamined, statistics::units::Count::get(),
+             "Number of squashed operands that are examined and possibly "
+             "removed from graph"),
+    ADD_STAT(squashedNonSpecRemoved, statistics::units::Count::get(),
+             "Number of squashed non-spec instructions that were removed"),
+    ADD_STAT(numIssuedDist, statistics::units::Count::get(),
+             "Number of insts issued each cycle"),
+    ADD_STAT(statFuBusy, statistics::units::Count::get(),
+             "attempts to use FU when none available"),
+    ADD_STAT(statIssuedInstType, statistics::units::Count::get(),
+             "Number of instructions issued per FU type, per thread"),
+    ADD_STAT(issueRate, statistics::units::Rate<
+                statistics::units::Count, statistics::units::Cycle>::get(),
+             "Inst issue rate", instsIssued / cpu->baseStats.numCycles),
+    ADD_STAT(fuBusy, statistics::units::Count::get(), "FU busy when requested"),
+    ADD_STAT(fuBusyRate, statistics::units::Rate<
+                statistics::units::Count, statistics::units::Count>::get(),
+             "FU busy rate (busy events/executed inst)")
 {
     instsAdded
         .prereq(instsAdded);
@@ -379,9 +281,11 @@ InstructionQueue::IQStats::IQStats(CPU *cpu, const unsigned &total_width)
         dist_unissued.subname(i, unissued_names[i]);
     }
 */
-    issuedInstType.init(cpu->numThreads, enums::Num_OpClass)
-        .flags(statistics::total | statistics::pdf | statistics::dist);
-    issuedInstType.ysubnames(enums::OpClassStrings);
+    statIssuedInstType
+        .init(cpu->numThreads,enums::Num_OpClass)
+        .flags(statistics::total | statistics::pdf | statistics::dist)
+        ;
+    statIssuedInstType.ysubnames(enums::OpClassStrings);
 
     //
     //  How long did instructions for a particular FU type wait prior to issue
@@ -492,13 +396,12 @@ InstructionQueue::resetState()
 {
     //Initialize thread IQ counts
     for (ThreadID tid = 0; tid < MaxThreads; tid++) {
+        count[tid] = 0;
         instList[tid].clear();
     }
 
     // Initialize the number of free IQ entries.
-    for (auto iq : iqs) {
-        iq->resetState();
-    }
+    freeEntries = numEntries;
 
     // Note that in actuality, the registers corresponding to the logical
     // registers start off as ready.  However this doesn't matter for the
@@ -530,9 +433,7 @@ InstructionQueue::resetState()
 void
 InstructionQueue::setActiveThreads(list<ThreadID> *at_ptr)
 {
-    for (auto iq : iqs) {
-        iq->setActiveThreads(at_ptr);
-    }
+    activeThreads = at_ptr;
 }
 
 void
@@ -576,34 +477,49 @@ InstructionQueue::takeOverFrom()
     resetState();
 }
 
+int
+InstructionQueue::entryAmount(ThreadID num_threads)
+{
+    if (iqPolicy == SMTQueuePolicy::Partitioned) {
+        return numEntries / num_threads;
+    } else {
+        return 0;
+    }
+}
+
+
+void
+InstructionQueue::resetEntries()
+{
+    if (iqPolicy != SMTQueuePolicy::Dynamic || numThreads > 1) {
+        int active_threads = activeThreads->size();
+
+        list<ThreadID>::iterator threads = activeThreads->begin();
+        list<ThreadID>::iterator end = activeThreads->end();
+
+        while (threads != end) {
+            ThreadID tid = *threads++;
+
+            if (iqPolicy == SMTQueuePolicy::Partitioned) {
+                maxEntries[tid] = numEntries / active_threads;
+            } else if (iqPolicy == SMTQueuePolicy::Threshold &&
+                       active_threads == 1) {
+                maxEntries[tid] = numEntries;
+            }
+        }
+    }
+}
+
 unsigned
 InstructionQueue::numFreeEntries()
 {
-    unsigned free_entries = 0;
-    for (auto iq : iqs) {
-        free_entries += iq->numFreeEntries();
-    }
-    return free_entries;
+    return freeEntries;
 }
 
 unsigned
 InstructionQueue::numFreeEntries(ThreadID tid)
 {
-    unsigned free_entries = 0;
-    for (auto iq : iqs) {
-        free_entries += iq->numFreeEntries(tid);
-    }
-    return free_entries;
-}
-
-unsigned
-InstructionQueue::numFreeEntries(const DynInstPtr &inst)
-{
-    unsigned free_entries = 0;
-    for (auto iq : iqs) {
-        free_entries += iq->numFreeEntries(inst);
-    }
-    return free_entries;
+    return maxEntries[tid] - count[tid];
 }
 
 // Might want to do something more complex if it knows how many instructions
@@ -611,29 +527,21 @@ InstructionQueue::numFreeEntries(const DynInstPtr &inst)
 bool
 InstructionQueue::isFull()
 {
-    return numFreeEntries() == 0;
+    if (freeEntries == 0) {
+        return(true);
+    } else {
+        return(false);
+    }
 }
 
 bool
 InstructionQueue::isFull(ThreadID tid)
 {
-    return numFreeEntries(tid) == 0;
-}
-
-bool
-InstructionQueue::isFull(const DynInstPtr &inst)
-{
-    return numFreeEntries(inst) == 0;
-}
-
-std::vector<FUPool *>
-InstructionQueue::allFUPools()
-{
-    std::vector<FUPool *> res;
-    for (auto iq : iqs) {
-        res.push_back(iq->fuPool());
+    if (numFreeEntries(tid) == 0) {
+        return(true);
+    } else {
+        return(false);
     }
-    return res;
 }
 
 bool
@@ -652,19 +560,6 @@ InstructionQueue::hasReadyInsts()
     return false;
 }
 
-IQUnit *
-InstructionQueue::findIQ(const DynInstPtr &inst)
-{
-    for (auto iq : iqs) {
-        // If the IQ can store the selected instruction,
-        // return the IQ as valid
-        if (iq->numFreeEntries(inst) > 0) {
-            return iq;
-        }
-    }
-    return nullptr;
-}
-
 void
 InstructionQueue::insert(const DynInstPtr &new_inst)
 {
@@ -681,11 +576,13 @@ InstructionQueue::insert(const DynInstPtr &new_inst)
     DPRINTF(IQ, "Adding instruction [sn:%llu] PC %s to the IQ.\n",
             new_inst->seqNum, new_inst->pcState());
 
+    assert(freeEntries != 0);
+
     instList[new_inst->threadNumber].push_back(new_inst);
 
-    auto iq = findIQ(new_inst);
-    assert(iq);
-    iq->insert(new_inst);
+    --freeEntries;
+
+    new_inst->setInIQ();
 
     // Look through its source registers (physical regs), and mark any
     // dependencies.
@@ -702,6 +599,10 @@ InstructionQueue::insert(const DynInstPtr &new_inst)
     }
 
     ++iqStats.instsAdded;
+
+    count[new_inst->threadNumber]++;
+
+    assert(freeEntries == (numEntries - countInsts()));
 }
 
 void
@@ -725,11 +626,13 @@ InstructionQueue::insertNonSpec(const DynInstPtr &new_inst)
             "to the IQ.\n",
             new_inst->seqNum, new_inst->pcState());
 
+    assert(freeEntries != 0);
+
     instList[new_inst->threadNumber].push_back(new_inst);
 
-    auto iq = findIQ(new_inst);
-    assert(iq);
-    iq->insert(new_inst);
+    --freeEntries;
+
+    new_inst->setInIQ();
 
     // Have this instruction set itself as the producer of its destination
     // register(s).
@@ -742,6 +645,10 @@ InstructionQueue::insertNonSpec(const DynInstPtr &new_inst)
     }
 
     ++iqStats.nonSpecInstsAdded;
+
+    count[new_inst->threadNumber]++;
+
+    assert(freeEntries == (numEntries - countInsts()));
 }
 
 void
@@ -820,8 +727,7 @@ InstructionQueue::moveToYoungerInst(ListOrderIt list_order_it)
 }
 
 void
-InstructionQueue::processFUCompletion(const DynInstPtr &inst, FUPool *fu_pool,
-                                      int fu_idx)
+InstructionQueue::processFUCompletion(const DynInstPtr &inst, int fu_idx)
 {
     DPRINTF(IQ, "Processing FU completion [sn:%llu]\n", inst->seqNum);
     assert(!cpu->switchedOut());
@@ -830,10 +736,8 @@ InstructionQueue::processFUCompletion(const DynInstPtr &inst, FUPool *fu_pool,
    --wbOutstanding;
     iewStage->wakeCPU();
 
-    if (fu_pool) {
-        assert(fu_idx > -1);
-        fu_pool->freeUnitNextCycle(fu_idx);
-    }
+    if (fu_idx > -1)
+        fuPool->freeUnitNextCycle(fu_idx);
 
     // @todo: Ensure that these FU Completions happen at the beginning
     // of a cycle, otherwise they could add too many instructions to
@@ -872,6 +776,8 @@ InstructionQueue::scheduleReadyInsts()
     // This will avoid trying to schedule a certain op class if there are no
     // FUs that handle it.
     int total_issued = 0;
+    // Debug-only classification; no scheduling decisions depend on this set.
+    std::set<OpClass> traced_busy_classes;
     ListOrderIt order_it = listOrder.begin();
     ListOrderIt order_end_it = listOrder.end();
 
@@ -913,11 +819,8 @@ InstructionQueue::scheduleReadyInsts()
         Cycles op_latency = Cycles(1);
         ThreadID tid = issuing_inst->threadNumber;
 
-        IQUnit *iq = issuing_inst->iq;
-        assert(iq);
-        auto fu_pool = iq->fuPool();
         if (op_class != No_OpClass) {
-            idx = fu_pool->getUnit(op_class);
+            idx = fuPool->getUnit(op_class);
             if (issuing_inst->isFloating()) {
                 iqIOStats.fpAluAccesses++;
             } else if (issuing_inst->isVector()) {
@@ -926,7 +829,7 @@ InstructionQueue::scheduleReadyInsts()
                 iqIOStats.intAluAccesses++;
             }
             if (idx > FUPool::NoFreeFU) {
-                op_latency = fu_pool->getOpLatency(op_class);
+                op_latency = fuPool->getOpLatency(op_class);
             }
         }
 
@@ -941,7 +844,7 @@ InstructionQueue::scheduleReadyInsts()
                 // Add the FU onto the list of FU's to be freed next
                 // cycle if we used one.
                 if (idx >= 0)
-                    fu_pool->freeUnitNextCycle(idx);
+                    fuPool->freeUnitNextCycle(idx);
 
                 // CPU has no capable FU for the instruction
                 // but this may be OK if the instruction gets
@@ -953,11 +856,11 @@ InstructionQueue::scheduleReadyInsts()
                   issuing_inst->setNoCapableFU();
             } else {
                 assert(idx != FUPool::NoCapableFU);
-                bool pipelined = fu_pool->isPipelined(op_class);
+                bool pipelined = fuPool->isPipelined(op_class);
                 // Generate completion event for the FU
                 ++wbOutstanding;
-                auto execution =
-                    new FUCompletion(issuing_inst, fu_pool, idx, this);
+                FUCompletion *execution = new FUCompletion(issuing_inst,
+                                                           idx, this);
 
                 cpu->schedule(execution,
                               cpu->clockEdge(Cycles(op_latency - 1)));
@@ -968,7 +871,7 @@ InstructionQueue::scheduleReadyInsts()
                     execution->setFreeFU();
                 } else {
                     // Add the FU onto the list of FU's to be freed next cycle.
-                    fu_pool->freeUnitNextCycle(idx);
+                    fuPool->freeUnitNextCycle(idx);
                 }
             }
 
@@ -987,6 +890,9 @@ InstructionQueue::scheduleReadyInsts()
             }
 
             issuing_inst->setIssued();
+            DPRINTF(CacheFlexDeps, "CFD ISSUE sn=%llu pc=%#x op=%d unit=%d latency=%llu\n",
+                    issuing_inst->seqNum, issuing_inst->pcState().instAddr(),
+                    int(op_class), idx, uint64_t(op_latency));
             ++total_issued;
 
 #if TRACING_ON
@@ -999,21 +905,42 @@ InstructionQueue::scheduleReadyInsts()
             if (!issuing_inst->isMemRef()) {
                 // Memory instructions can not be freed from the IQ until they
                 // complete.
+                ++freeEntries;
+                count[tid]--;
                 issuing_inst->clearInIQ();
             } else {
                 memDepUnit[tid].issue(issuing_inst);
             }
 
             listOrder.erase(order_it++);
-            iqStats.issuedInstType[tid][op_class]++;
+            iqStats.statIssuedInstType[tid][op_class]++;
         } else {
             assert(idx == FUPool::NoFreeFU);
             iqStats.statFuBusy[op_class]++;
             iqStats.fuBusy[tid]++;
+            if (debug::CacheFlexDeps)
+                traced_busy_classes.insert(op_class);
             ++order_it;
         }
     }
 
+    if (debug::CacheFlexDeps && (cpu->cpuId() == 0 || cpu->cpuId() == 7)) {
+        // Snapshot COPIES of the ready queues after this cycle's selection.
+        // Report only observed reasons, not a counterfactual critical path.
+        for (int c = 0; c < Num_OpClasses; ++c) {
+            auto pending = readyInsts[c];
+            while (!pending.empty()) {
+                auto inst = pending.top(); pending.pop();
+                if (!inst->isSquashed()) {
+                    const char *reason = traced_busy_classes.count(OpClass(c)) ?
+                        "fu_unavailable" : (total_issued == totalWidth ?
+                        "issue_width" : "scheduler_other");
+                    DPRINTF(CacheFlexDeps, "CFD WAIT sn=%llu op=%d reason=%s issued=%d\n",
+                            inst->seqNum, c, reason, total_issued);
+                }
+            }
+        }
+    }
     iqStats.numIssuedDist.sample(total_issued);
     iqStats.instsIssued+= total_issued;
 
@@ -1068,6 +995,8 @@ InstructionQueue::commit(const InstSeqNum &inst, ThreadID tid)
         ++iq_it;
         instList[tid].pop_front();
     }
+
+    assert(freeEntries == (numEntries - countInsts()));
 }
 
 int
@@ -1085,6 +1014,11 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
     }
 
     completed_inst->lastWakeDependents = curTick();
+    DPRINTF(CacheFlexDeps,
+            "CFD DONE sn=%llu pc=%#x op=%d load=%d spm=%d va=%#x\n",
+            completed_inst->seqNum, completed_inst->pcState().instAddr(),
+            int(completed_inst->opClass()), completed_inst->isLoad(),
+            bool(completed_inst->memReqFlags & Request::SPMLD), completed_inst->effAddr);
 
     DPRINTF(IQ, "Waking dependents of completed instruction.\n");
 
@@ -1100,8 +1034,9 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
         DPRINTF(IQ, "Completing mem instruction PC: %s [sn:%llu]\n",
             completed_inst->pcState(), completed_inst->seqNum);
 
-        completed_inst->clearInIQ();
+        ++freeEntries;
         completed_inst->memOpDone(true);
+        count[tid]--;
     } else if (completed_inst->isReadBarrier() ||
                completed_inst->isWriteBarrier()) {
         // Completes a non mem ref barrier
@@ -1117,7 +1052,7 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
 
         // Special case of uniq or control registers.  They are not
         // handled by the IQ and thus have no dependency graph entry.
-        if (dest_reg->isAlwaysReady()) {
+        if (dest_reg->isFixedMapping()) {
             DPRINTF(IQ, "Reg %d [%s] is part of a fix mapping, skipping\n",
                     dest_reg->index(), dest_reg->className());
             continue;
@@ -1143,6 +1078,8 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
         DynInstPtr dep_inst = dependGraph.pop(dest_reg->flatIndex());
 
         while (dep_inst) {
+            DPRINTF(CacheFlexDeps, "CFD EDGE producer=%llu consumer=%llu reg=%d\n",
+                    completed_inst->seqNum, dep_inst->seqNum, dest_reg->flatIndex());
             DPRINTF(IQ, "Waking up a dependent instruction, [sn:%llu] "
                     "PC %s.\n", dep_inst->seqNum, dep_inst->pcState());
 
@@ -1173,9 +1110,8 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
 void
 InstructionQueue::addReadyMemInst(const DynInstPtr &ready_inst)
 {
+    DPRINTF(CacheFlexDeps, "CFD READY sn=%llu mem=1\n", ready_inst->seqNum);
     OpClass op_class = ready_inst->opClass();
-
-    assert(op_class < Num_OpClasses);
 
     readyInsts[op_class].push(ready_inst);
 
@@ -1208,6 +1144,27 @@ InstructionQueue::rescheduleMemInst(const DynInstPtr &resched_inst)
 }
 
 void
+InstructionQueue::retrySpmAddrLoad(const DynInstPtr &inst)
+{
+    if (inst->isSquashed())
+        return;
+    inst->translationStarted(false);
+    inst->translationCompleted(false);
+    inst->clearIssued();
+    inst->clearCanIssue();
+    inst->effAddrValid(false);
+    // No known overlapping copy exists to wake this instruction yet. Use
+    // the IQ retry path, not MemDepUnit's externally triggered replay list.
+    // Each execution rechecks the sequence-filtered RAW/WAR shadow table.
+    for (const auto &queued : retryMemInsts) {
+        if (queued == inst)
+            return;
+    }
+    retryMemInsts.push_back(inst);
+    cpu->wakeCPU();
+}
+
+void
 InstructionQueue::replayMemInst(const DynInstPtr &replay_inst)
 {
     memDepUnit[replay_inst->threadNumber].replay();
@@ -1228,12 +1185,6 @@ InstructionQueue::blockMemInst(const DynInstPtr &blocked_inst)
     DPRINTF(IQ, "Memory inst [sn:%llu] PC %s is blocked, will be "
             "reissued later\n", blocked_inst->seqNum,
             blocked_inst->pcState());
-}
-
-void
-InstructionQueue::retryMemInst(const DynInstPtr &retry_inst)
-{
-    retryMemInsts.push_back(retry_inst);
 }
 
 void
@@ -1278,16 +1229,6 @@ InstructionQueue::violation(const DynInstPtr &store,
 {
     iqIOStats.intInstQueueWrites++;
     memDepUnit[store->threadNumber].violation(store, faulting_load);
-}
-
-unsigned
-InstructionQueue::getCount(ThreadID tid) const
-{
-    unsigned count = 0;
-    for (auto iq : iqs) {
-        count += iq->getCount(tid);
-    }
-    return count;
 }
 
 void
@@ -1375,7 +1316,7 @@ InstructionQueue::doSquash(ThreadID tid)
                     // leaves more room for error.
 
                     if (!squashed_inst->readySrcIdx(src_reg_idx) &&
-                        !src_reg->isAlwaysReady()) {
+                        !src_reg->isFixedMapping()) {
                         dependGraph.remove(src_reg->flatIndex(),
                                            squashed_inst);
                     }
@@ -1417,6 +1358,11 @@ InstructionQueue::doSquash(ThreadID tid)
             squashed_inst->setIssued();
             squashed_inst->setCanCommit();
             squashed_inst->clearInIQ();
+
+            //Update Thread IQ Count
+            count[squashed_inst->threadNumber]--;
+
+            ++freeEntries;
         }
 
         // IQ clears out the heads of the dependency graph only when
@@ -1432,7 +1378,7 @@ InstructionQueue::doSquash(ThreadID tid)
         {
             PhysRegIdPtr dest_reg =
                 squashed_inst->renamedDestIdx(dest_reg_idx);
-            if (dest_reg->isAlwaysReady()) {
+            if (dest_reg->isFixedMapping()){
                 continue;
             }
             assert(dependGraph.empty(dest_reg->flatIndex()));
@@ -1470,7 +1416,7 @@ InstructionQueue::addToDependents(const DynInstPtr &new_inst)
             // hasn't become ready while the instruction was in flight
             // between stages.  Only if it really isn't ready should
             // it be added to the dependency graph.
-            if (src_reg->isAlwaysReady()) {
+            if (src_reg->isFixedMapping()) {
                 continue;
             } else if (!regScoreboard[src_reg->flatIndex()]) {
                 DPRINTF(IQ, "Instruction PC %s has src reg %i (%s) that "
@@ -1500,6 +1446,20 @@ InstructionQueue::addToDependents(const DynInstPtr &new_inst)
 void
 InstructionQueue::addToProducers(const DynInstPtr &new_inst)
 {
+    if (debug::CacheFlexDeps) {
+        DPRINTF(CacheFlexDeps,
+                "CFD NODE sn=%llu pc=%#x upc=%llu op=%d load=%d store=%d asm=%s\n",
+                new_inst->seqNum, new_inst->pcState().instAddr(),
+                uint64_t(new_inst->pcState().microPC()), int(new_inst->opClass()),
+                new_inst->isLoad(), new_inst->isStore(),
+                new_inst->staticInst->disassemble(new_inst->pcState().instAddr()));
+        for (int i = 0; i < new_inst->numSrcRegs(); ++i) {
+            auto reg = new_inst->renamedSrcIdx(i);
+            if (!reg->isFixedMapping())
+                DPRINTF(CacheFlexDeps, "CFD SRC sn=%llu idx=%d reg=%d ready=%d\n",
+                        new_inst->seqNum, i, reg->flatIndex(), new_inst->readySrcIdx(i));
+        }
+    }
     // Nothing really needs to be marked when an instruction becomes
     // the producer of a register's value, but for convenience a ptr
     // to the producing instruction will be placed in the head node of
@@ -1514,7 +1474,7 @@ InstructionQueue::addToProducers(const DynInstPtr &new_inst)
 
         // Some registers have fixed mapping, and there is no need to track
         // dependencies as these instructions must be executed at commit.
-        if (dest_reg->isAlwaysReady()) {
+        if (dest_reg->isFixedMapping()) {
             continue;
         }
 
@@ -1526,6 +1486,8 @@ InstructionQueue::addToProducers(const DynInstPtr &new_inst)
         }
 
         dependGraph.setInst(dest_reg->flatIndex(), new_inst);
+        DPRINTF(CacheFlexDeps, "CFD DST sn=%llu idx=%d reg=%d\n",
+                new_inst->seqNum, dest_reg_idx, dest_reg->flatIndex());
 
         // Mark the scoreboard to say it's not yet ready.
         regScoreboard[dest_reg->flatIndex()] = false;
@@ -1538,6 +1500,7 @@ InstructionQueue::addIfReady(const DynInstPtr &inst)
     // If the instruction now has all of its source registers
     // available, then add it to the list of ready instructions.
     if (inst->readyToIssue()) {
+        DPRINTF(CacheFlexDeps, "CFD REGS_READY sn=%llu\n", inst->seqNum);
 
         //Add the instruction to the proper ready list.
         if (inst->isMemRef()) {
@@ -1553,7 +1516,7 @@ InstructionQueue::addIfReady(const DynInstPtr &inst)
 
         OpClass op_class = inst->opClass();
 
-        assert(op_class < Num_OpClasses);
+        DPRINTF(CacheFlexDeps, "CFD READY sn=%llu mem=0\n", inst->seqNum);
 
         DPRINTF(IQ, "Instruction is ready to issue, putting it onto "
                 "the ready list, PC %s opclass:%i [sn:%llu].\n",
@@ -1571,6 +1534,12 @@ InstructionQueue::addIfReady(const DynInstPtr &inst)
             addToOrderList(op_class);
         }
     }
+}
+
+int
+InstructionQueue::countInsts()
+{
+    return numEntries - freeEntries;
 }
 
 void

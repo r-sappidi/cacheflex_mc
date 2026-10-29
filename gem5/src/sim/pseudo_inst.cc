@@ -41,6 +41,7 @@
  */
 
 #include "sim/pseudo_inst.hh"
+#include "debug/CacheFlexResidency.hh"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -497,6 +498,8 @@ void
 workbegin(ThreadContext *tc, uint64_t workid, uint64_t threadid)
 {
     DPRINTF(PseudoInst, "pseudo_inst::workbegin(%i, %i)\n", workid, threadid);
+    DPRINTFR(CacheFlexResidency, "%llu: CFRES BEGIN core=%d work=%llu\n",
+             curTick(), tc->contextId(), workid);
     System *sys = tc->getSystemPtr();
     const System::Params &params = sys->params();
 
@@ -560,6 +563,8 @@ void
 workend(ThreadContext *tc, uint64_t workid, uint64_t threadid)
 {
     DPRINTF(PseudoInst, "pseudo_inst::workend(%i, %i)\n", workid, threadid);
+    DPRINTFR(CacheFlexResidency, "%llu: CFRES END core=%d work=%llu\n",
+             curTick(), tc->contextId(), workid);
     System *sys = tc->getSystemPtr();
     const System::Params &params = sys->params();
 

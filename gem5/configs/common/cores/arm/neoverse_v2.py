@@ -62,6 +62,10 @@ class Neoverse_V2_CI_FUP(FUPool):
 # Floating point and SIMD instructions
 class NeoverseV2_FP(FUDesc):
     opList = [
+        # SVE predicate instructions (for example PTRUE) have their own gem5
+        # operation class. Without this entry an SVE instruction can enter an
+        # IQ but can never be assigned to a functional unit.
+        OpDesc(opClass="SimdPredAlu", opLat=1),
         OpDesc(opClass="SimdAdd", opLat=3),
         OpDesc(opClass="SimdAddAcc", opLat=4),
         OpDesc(opClass="SimdAlu", opLat=4),
@@ -100,11 +104,33 @@ class Neoverse_V2_FP_FUP(FUPool):
 
 # Load/Store Unit
 class NeoverseV2_Load(FUDesc):
-    opList = [OpDesc(opClass="MemRead", opLat=2)]
+    opList = [
+        OpDesc(opClass="MemRead", opLat=2),
+        OpDesc(opClass="FloatMemRead", opLat=2),
+        OpDesc(opClass="SimdUnitStrideLoad", opLat=2),
+        OpDesc(opClass="SimdUnitStrideMaskLoad", opLat=2),
+        OpDesc(opClass="SimdUnitStrideSegmentedLoad", opLat=2),
+        OpDesc(opClass="SimdStridedLoad", opLat=2),
+        OpDesc(opClass="SimdIndexedLoad", opLat=2),
+        OpDesc(opClass="SimdUnitStrideFaultOnlyFirstLoad", opLat=2),
+        OpDesc(opClass="SimdUnitStrideSegmentedFaultOnlyFirstLoad", opLat=2),
+        OpDesc(opClass="SimdWholeRegisterLoad", opLat=2),
+        OpDesc(opClass="SimdStrideSegmentedLoad", opLat=2),
+    ]
 
 
 class NeoverseV2_Store(FUDesc):
-    opList = [OpDesc(opClass="MemWrite", opLat=2)]
+    opList = [
+        OpDesc(opClass="MemWrite", opLat=2),
+        OpDesc(opClass="FloatMemWrite", opLat=2),
+        OpDesc(opClass="SimdUnitStrideStore", opLat=2),
+        OpDesc(opClass="SimdUnitStrideMaskStore", opLat=2),
+        OpDesc(opClass="SimdUnitStrideSegmentedStore", opLat=2),
+        OpDesc(opClass="SimdStridedStore", opLat=2),
+        OpDesc(opClass="SimdIndexedStore", opLat=2),
+        OpDesc(opClass="SimdWholeRegisterStore", opLat=2),
+        OpDesc(opClass="SimdStrideSegmentedStore", opLat=2),
+    ]
 
 
 # Load only pool

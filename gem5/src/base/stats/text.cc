@@ -48,6 +48,7 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -793,7 +794,10 @@ SparseHistPrint::operator()(std::ostream &stream) const
         std::stringstream namestr;
         namestr << base;
 
-        namestr <<(*it).first;
+        // Sparse keys can be instruction addresses. Default precision (6)
+        // rounds distinct PCs to the same printed name above 1 million.
+        namestr << std::setprecision(std::numeric_limits<Counter>::max_digits10)
+                << (*it).first;
         print.name = namestr.str();
         print.value = (*it).second;
         print(stream);

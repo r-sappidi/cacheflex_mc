@@ -240,6 +240,13 @@ class StaticInst : public RefCounted, public StaticInstFlags
 
     virtual uint64_t getEMI() const { return 0; }
 
+    // Address-only metadata for supported physical SPM stores. No memory,
+    // data-register or architectural-state side effects are permitted here.
+    // The caller must first establish readiness of integer source operand 0.
+    virtual bool spmStoreAddress(RegVal base, ThreadContext *tc,
+                                 Addr &addr, unsigned &bytes) const
+    { return false; }
+
   protected:
 
     /**

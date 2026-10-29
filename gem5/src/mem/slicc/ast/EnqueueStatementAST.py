@@ -107,6 +107,8 @@ class EnqueueStatementAST(StatementAST):
                 "m_ruby_system->getRandomization(), m_ruby_system->getWarmupEnabled());"
             )
 
+        code('recordFlightMessage("SEND", "${{self.queue_name.var.ident}}", *out_msg);')
+
         # End scope
         self.symtab.popFrame()
         code.dedent()

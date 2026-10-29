@@ -76,8 +76,12 @@ class RubyRequest : public Message
     uint64_t m_instSeqNum;
     Addr m_SrcAddr = 0; // C6
     Addr m_DstSPMAddr = 0; // C6
+    Addr m_L3Finalize = 0;
     int m_SPMSet = 0; // C6
     int m_SPMWay = 0; // C6
+    int m_SPMMulticastMask = 0;
+    bool m_SPMMulticastClaim = false;
+    bool m_SPMMasked = false;
     bool m_htmFromTransaction;
     uint64_t m_htmTransactionUid;
     bool m_isTlbi;

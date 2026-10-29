@@ -40,6 +40,7 @@
 #include "mem/ruby/network/MessageBuffer.hh"
 #include "mem/ruby/network/garnet/Credit.hh"
 #include "mem/ruby/network/garnet/flitBuffer.hh"
+#include "mem/ruby/network/CacheFlexTiming.hh"
 #include "mem/ruby/slicc_interface/Message.hh"
 #include "mem/ruby/system/RubySystem.hh"
 
@@ -154,6 +155,7 @@ NetworkInterface::dequeueCallback()
 void
 NetworkInterface::incrementStats(flit *t_flit)
 {
+    CFT_FLIT("NI_COMPLETE", t_flit, "arrived=%llu", t_flit->get_dequeue_time());
     int vnet = t_flit->get_vnet();
 
     // Latency
@@ -170,6 +172,8 @@ NetworkInterface::incrementStats(flit *t_flit)
 
     if (t_flit->get_type() == TAIL_ || t_flit->get_type() == HEAD_TAIL_) {
         m_net_ptr->increment_received_packets(vnet);
+        m_net_ptr->profileMessage(t_flit->get_msg_ptr().get(),
+            t_flit->get_route(), 0, 0, true, network_delay, queueing_delay);
         m_net_ptr->increment_packet_network_latency(network_delay, vnet);
         m_net_ptr->increment_packet_queueing_latency(queueing_delay, vnet);
     }
@@ -235,6 +239,7 @@ NetworkInterface::wakeup()
 
             int vnet = t_flit->get_vnet();
             t_flit->set_dequeue_time(curTick());
+            CFT_FLIT("NI_ARRIVE", t_flit, "");
 
             // If a tail flit is received, enqueue into the protocol buffers
             // if space is available. Otherwise, exchange non-tail flits for
@@ -242,6 +247,7 @@ NetworkInterface::wakeup()
             if (t_flit->get_type() == TAIL_ ||
                 t_flit->get_type() == HEAD_TAIL_) {
                 if (!iPort->messageEnqueuedThisCycle &&
+                    (!m_net_ptr->directReductionEnabled() || directProtocolEnqueue != curTime) &&
                     outNode_ptr[vnet]->areNSlotsAvailable(1, curTime)) {
                     // Space is available. Enqueue to protocol buffer.
                     outNode_ptr[vnet]->enqueue(t_flit->get_msg_ptr(), curTime,
@@ -249,6 +255,8 @@ NetworkInterface::wakeup()
                                                m_net_ptr->getRandomization(),
                                                m_net_ptr->getWarmupEnabled());
 
+                    if (m_net_ptr->directReductionEnabled())
+                        directProtocolEnqueue = curTime;
                     // Simply send a credit back since we are not buffering
                     // this flit in the NI
                     Credit *cFlit = new Credit(t_flit->get_vc(),
@@ -332,13 +340,16 @@ NetworkInterface::checkStallQueue()
 
                 // If we can now eject to the protocol buffer,
                 // send back credits
-                if (outNode_ptr[vnet]->areNSlotsAvailable(1,
+                if ((!m_net_ptr->directReductionEnabled() || directProtocolEnqueue != curTime) &&
+                    outNode_ptr[vnet]->areNSlotsAvailable(1,
                     curTime)) {
                     outNode_ptr[vnet]->enqueue(stallFlit->get_msg_ptr(),
                         curTime, cyclesToTicks(Cycles(1)),
                         m_net_ptr->getRandomization(),
                         m_net_ptr->getWarmupEnabled());
 
+                    if (m_net_ptr->directReductionEnabled())
+                        directProtocolEnqueue = curTime;
                     // Send back a credit with free signal now that the
                     // VC is no longer stalled.
                     Credit *cFlit = new Credit(stallFlit->get_vc(), true,
@@ -369,10 +380,71 @@ NetworkInterface::checkStallQueue()
     }
 }
 
+// The direct link retains one source head and one bounded RX assembly record.
+// A successful protocol-buffer enqueue releases the credit only after a reverse
+// propagation delay. The packet shares the existing protocol ejection port.
+bool
+NetworkInterface::directMessage(MsgPtr msg, int vnet, int kind)
+{
+    const Tick now = clockEdge();
+    if (!directPending) {
+        if (now < directCreditReady) {
+            m_net_ptr->directCreditWait++;
+            return false;
+        }
+        const unsigned bytes = kind == 1 ?
+            m_net_ptr->MessageSizeType_to_int(msg->getMessageSize()) : 16;
+        fatal_if(bytes > 272, "Direct RX packet exceeds physical assembly storage");
+        const unsigned beats = (bytes + m_net_ptr->directBytes() - 1) /
+                               m_net_ptr->directBytes();
+        directPending = msg;
+        // TX endpoint + serialized beats + registered local wire.
+        directArrival = clockEdge(Cycles(1 + beats + m_net_ptr->directLatency()));
+        if (kind == 1) {
+            m_net_ptr->directCommands++;
+            m_net_ptr->directCommandBytes += bytes;
+        } else {
+            m_net_ptr->directAcks++;
+            m_net_ptr->directAckBytes += bytes;
+        }
+        m_net_ptr->directBeats += beats;
+        m_net_ptr->directMaxPending = 1;
+    }
+    fatal_if(directPending != msg, "Direct one-credit source head changed");
+    if (now < directArrival)
+        return false;
+    auto *peer = m_net_ptr->directPeer(msg->getDestination().getAllDest().at(0));
+    fatal_if(peer->clockPeriod() != clockPeriod(), "Direct link clock-domain mismatch");
+    auto *buffer = peer->outNode_ptr.at(vnet);
+    fatal_if(!buffer, "Direct link has no protocol destination");
+    if (peer->directProtocolEnqueue == now || !buffer->areNSlotsAvailable(1, now)) {
+        m_net_ptr->directReceiveBlocked++;
+        return false;
+    }
+    // RX endpoint cycle; no additional SRAM port or controller transition.
+    // Enqueue changes Message timestamps; preserve the still-owned source head.
+    buffer->enqueue(msg->clone(), now, cyclesToTicks(Cycles(1)),
+                    m_net_ptr->getRandomization(), m_net_ptr->getWarmupEnabled());
+    peer->directProtocolEnqueue = now;
+    // A direct arrival can block another vnet's stalled tail without freeing
+    // that vnet's buffer. Explicitly revisit it; do not add polling when the
+    // feature is enabled but no direct traffic exists.
+    peer->scheduleEvent(Cycles(1));
+    directPending.reset();
+    directCreditReady = clockEdge(Cycles(1 + m_net_ptr->directLatency()));
+    m_net_ptr->directDelivered++;
+    return true;
+}
+
 // Embed the protocol message into flits
 bool
 NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
 {
+    if (m_net_ptr->directReductionEnabled()) {
+        const int kind = m_net_ptr->directReductionKind(msg_ptr.get(), m_id, vnet);
+        if (kind)
+            return directMessage(msg_ptr, vnet, kind);
+    }
     Message *net_msg_ptr = msg_ptr.get();
     NetDest net_msg_dest = net_msg_ptr->getDestination();
 
@@ -394,9 +466,10 @@ NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
     for (int ctr = 0; ctr < dest_nodes.size(); ctr++) {
 
         // this will return a free output virtual channel
-        int vc = calculateVC(vnet);
+        int vc = calculateVC(vnet, dest_nodes[ctr]);
 
         if (vc == -1) {
+            CFT_MSG("NI_NO_VC", msg_ptr.get(), "vnet=%d", vnet);
             return false ;
         }
         MsgPtr new_msg_ptr = msg_ptr->clone();
@@ -444,8 +517,13 @@ NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
         route.hops_traversed = -1;
 
         m_net_ptr->increment_injected_packets(vnet);
+        m_net_ptr->profileMessage(new_net_msg_ptr, route, num_flits,
+            m_net_ptr->MessageSizeType_to_int(net_msg_ptr->getMessageSize()));
         m_net_ptr->update_traffic_distribution(route);
         int packet_id = m_net_ptr->getNextPacketID();
+        CFT_MSG("NI_PACKET", new_msg_ptr.get(),
+            "parent=%p packet=%d count=%d src=%d dst=%d vc=%d vnet=%d",
+            (const void*)msg_ptr.get(), packet_id, num_flits, m_id, destID, vc, vnet);
         for (int i = 0; i < num_flits; i++) {
             m_net_ptr->increment_injected_flits(vnet);
             flit *fl = new flit(packet_id,
@@ -466,13 +544,16 @@ NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
 
 // Looking for a free output vc
 int
-NetworkInterface::calculateVC(int vnet)
+NetworkInterface::calculateVC(int vnet, int dest)
 {
     for (int i = 0; i < m_vc_per_vnet; i++) {
         int delta = m_vc_allocator[vnet];
         m_vc_allocator[vnet]++;
         if (m_vc_allocator[vnet] == m_vc_per_vnet)
             m_vc_allocator[vnet] = 0;
+
+        if (!m_net_ptr->requestVCAllowed(vnet, delta, m_vc_per_vnet, dest))
+            continue;
 
         if (outVcState[(vnet*m_vc_per_vnet) + delta].isInState(
                     IDLE_, curTick())) {
@@ -512,6 +593,9 @@ NetworkInterface::scheduleOutputPort(OutputPort *oPort)
                    for (int vc_offset = 0; vc_offset < m_vc_per_vnet;
                         vc_offset++) {
                        int t_vc = vc_base + vc_offset;
+                       if (!m_net_ptr->sameRequestVCClass(
+                               t_vnet, vc, t_vc, m_vc_per_vnet))
+                           continue;
                        if (niOutVcs[t_vc].isReady(curTick())) {
                            if (m_ni_out_vcs_enqueue_time[t_vc] <
                                m_ni_out_vcs_enqueue_time[vc]) {
@@ -531,6 +615,7 @@ NetworkInterface::scheduleOutputPort(OutputPort *oPort)
 
                // Just removing the top flit
                flit *t_flit = niOutVcs[vc].getTopFlit();
+               CFT_FLIT("NI_SEND", t_flit, "link_ready=%llu", clockEdge(Cycles(1)));
                t_flit->set_time(clockEdge(Cycles(1)));
 
                // Scheduling the flit
@@ -675,6 +760,20 @@ void
 NetworkInterface::print(std::ostream& out) const
 {
     out << "[Network Interface]";
+}
+
+bool
+NetworkInterface::functionalRead(Packet *pkt)
+{
+    for (auto& ni_out_vc : niOutVcs) {
+        if (ni_out_vc.functionalRead(pkt))
+            return true;
+    }
+    for (auto &oPort : outPorts) {
+        if (oPort->outFlitQueue()->functionalRead(pkt))
+            return true;
+    }
+    return false;
 }
 
 bool

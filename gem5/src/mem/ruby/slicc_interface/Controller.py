@@ -54,6 +54,12 @@ class RubyController(ClockedObject):
         [AllMemory], "Address range this controller responds to"
     )
     cluster_id = Param.UInt32(0, "Id of this controller's cluster")
+    flight_recorder_entries = Param.Unsigned(
+        0, "Per-controller bounded diagnostic records; zero disables recording"
+    )
+    flight_recorder_messages = Param.Bool(
+        True, "Also record SLICC message enqueue/peek observations"
+    )
 
     transitions_per_cycle = Param.Int(
         32, "no. of  SLICC state machine transitions per cycle"

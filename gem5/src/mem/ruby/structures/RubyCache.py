@@ -49,6 +49,13 @@ class RubyCache(SimObject):
     block_size = Param.MemorySize(
         "0B", "block size in bytes. 0 means default RubyBlockSize"
     )
+    spm_separate_backing = Param.Bool(
+        False, "Diagnostic: add SPM-only slots without reducing coherent capacity; shared timing/ports unchanged"
+    )
+    spm_set_stride = Param.Unsigned(
+        0, "Experimental per-way SPM set offset: (logical_set + way * stride) "
+        "modulo physical sets. Zero retains original placement; no extra SRAM."
+    )
 
     # Atomic parameters only applicable to GPU atomics
     # Zero atomic latency corresponds to instantanous atomic ALU operations

@@ -85,6 +85,7 @@ class MessageBuffer : public SimObject
 
     // TRUE if head of queue timestamp <= SystemTime
     bool isReady(Tick current_time) const;
+    bool tryIngressBypass(Tick current_time);
 
     // earliest tick the head of queue will be ready, or MaxTick if empty
     Tick readyTime() const;
@@ -93,10 +94,8 @@ class MessageBuffer : public SimObject
     delayHead(Tick current_time, Tick delta, bool ruby_is_random,
               bool ruby_warmup)
     {
-        MsgPtr m = m_prio_heap.front();
-        std::pop_heap(m_prio_heap.begin(), m_prio_heap.end(),
-                      std::greater<MsgPtr>());
-        m_prio_heap.pop_back();
+        MsgPtr m = peekMsgPtr();
+        removeSelected();
         enqueue(m, current_time, delta, ruby_is_random, ruby_warmup);
     }
 
@@ -122,7 +121,10 @@ class MessageBuffer : public SimObject
     //! message queue.  The function assumes that the queue is nonempty.
     const Message* peek() const;
 
-    const MsgPtr &peekMsgPtr() const { return m_prio_heap.front(); }
+    const MsgPtr &peekMsgPtr() const {
+        return m_bypass_selected && m_bypass_tick == curTick() ?
+            m_bypass_selected : m_prio_heap.front();
+    }
 
     void enqueue(MsgPtr message, Tick curTime, Tick delta,
                 bool ruby_is_random, bool ruby_warmup,
@@ -257,6 +259,14 @@ class MessageBuffer : public SimObject
      * messages have been dequeued in the same cycle.
      */
     const unsigned int m_max_dequeue_rate;
+    const unsigned int m_ingress_lookahead;
+    const bool m_copy_demand_bypass;
+    Tick m_bypass_tick = MaxTick;
+    MsgPtr m_bypass_selected;
+    // Host references only: messages stay in the original heap and count toward
+    // its capacity. No modeled request/data storage is added.
+    std::vector<MsgPtr> m_bypass_attempted;
+    void removeSelected();
 
     unsigned int m_dequeues_this_cy;
 
@@ -279,6 +289,7 @@ class MessageBuffer : public SimObject
     bool m_last_message_strict_fifo_bypassed;
 
     const bool m_strict_fifo;
+    const bool m_clamp_fifo_arrival;
     const MessageRandomization m_randomization;
     const bool m_allow_zero_latency;
 
@@ -295,6 +306,11 @@ class MessageBuffer : public SimObject
     statistics::Scalar m_stall_count;
     statistics::Formula m_avg_stall_time;
     statistics::Formula m_occupancy;
+    statistics::Scalar m_ingressBypassSelections;
+    statistics::Scalar m_ingressBypassDequeues;
+    statistics::Scalar m_ingressBypassStalls;
+    statistics::Scalar m_ingressBypassDependencyRejects;
+    statistics::Scalar m_ingressBypassNoCandidate;
 };
 
 Tick random_time();

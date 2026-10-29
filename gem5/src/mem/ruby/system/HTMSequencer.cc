@@ -180,7 +180,7 @@ HTMSequencer::htmCallback(Addr address,
             SequencerRequest &request = seq_req_list.front();
 
             PacketPtr pkt = request.pkt;
-            markRemoved();
+            markRemoved(request);
 
             // TODO - atomics
 

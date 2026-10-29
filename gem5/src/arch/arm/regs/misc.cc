@@ -6814,7 +6814,11 @@ ISA::initializeMiscRegMetadata()
       .mapsTo(MISCREG_TPIDRPRW_NS);
     InitReg(MISCREG_TPIDR_EL0)
       .allPrivileges()
-      .serializing(false)
+      // The imported micro O3 does not carry the newer misc-register
+      // dependency machinery required by non-serializing MSR/MRS pairs.
+      // Keep TLS writes and following reads ordered, as in the micro tree's
+      // serializing Msr64/Mrs64 instruction forms.
+      .serializing(true)
       .faultRead(EL0, faultFgtEL0<true, &HFGTR::tpidrEL0>)
       .faultWrite(EL0, faultFgtEL0<false, &HFGTR::tpidrEL0>)
       .faultRead(EL1, faultFgtEL1<true, &HFGTR::tpidrEL0>)

@@ -268,12 +268,21 @@ class Request : public Extensible<Request>
         SPMCP_INSTALL              = 0x0004000000000000,
         SPMLD                      = 0x0008000000000000,
         SPMST                      = 0x0010000000000000,
+        SPMCP_BATCH3               = 0x0020000000000000,
         SPMWB_READ                 = 0x0040000000000000,
         SPMWB_STORE                = 0x0080000000000000,
         SPM_RELEASE                = 0x0100000000000000,
+        SPMDMA_2D                  = 0x0200000000000000,
         SPM_OPS                    = SPMCP_FETCH | SPMCP_INSTALL |
+                                     SPMCP_BATCH3 | SPMDMA_2D |
                                      SPMLD | SPMST | SPMWB_READ |
                                      SPMWB_STORE | SPM_RELEASE,
+
+        /** Compatibility names used by the micro O3 implementation. */
+        SPM_STORE                 = SPMST,
+        SPM_LOAD                  = SPMLD,
+        SPM_WRITEBACK             = SPMWB_STORE,
+        CP_TO_SPM                 = SPMCP_FETCH,
         // clang-format on
     };
     static const FlagsType STORE_NO_DATA = CACHE_BLOCK_ZERO |
@@ -505,6 +514,12 @@ class Request : public Extensible<Request>
     /** C6: Decoded SPM destination way id. */
     int _spmWay = 0;
 
+    /** CacheFlex multicast destination-core mask encoded by software. */
+    uint8_t _spmMulticastMask = 0;
+
+    /** Multicast SPMCP reserves destinations without fetching source data. */
+    bool _spmMulticastClaim = false;
+
   public:
 
     /**
@@ -553,6 +568,8 @@ class Request : public Extensible<Request>
           _localAccessor(other._localAccessor),
           _spmSrcAddr(other._spmSrcAddr), _spmDstAddr(other._spmDstAddr),
           _spmSet(other._spmSet), _spmWay(other._spmWay),
+          _spmMulticastMask(other._spmMulticastMask),
+          _spmMulticastClaim(other._spmMulticastClaim),
           translateDelta(other.translateDelta),
           accessDelta(other.accessDelta), depth(other.depth)
     {
@@ -1055,6 +1072,8 @@ class Request : public Extensible<Request>
     bool hasNoAddr() const { return _flags.isSet(HAS_NO_ADDR); }
     bool isSPMRequest() const { return _flags.isSet(SPM_OPS); } // C6
     bool isSPMCPFetch() const { return _flags.isSet(SPMCP_FETCH); } // C6
+    bool isSPMCPBatch3() const { return _flags.isSet(SPMCP_BATCH3); }
+    bool isSPMDma2D() const { return _flags.isSet(SPMDMA_2D); }
     bool isSPMCPInstall() const { return _flags.isSet(SPMCP_INSTALL); } // C6
     bool isSPMLD() const { return _flags.isSet(SPMLD); } // C6
     bool isSPMST() const { return _flags.isSet(SPMST); } // C6
@@ -1067,10 +1086,24 @@ class Request : public Extensible<Request>
     }
     void setSPMMetadata(Addr src_addr, Addr dst_spm_addr) // C6
     {
+        // Experimental shared-L3 address: bit59, bank[22:20], and the
+        // existing way/set/offset in [18:0]. Never interpret bank as multicast.
+        const bool shared = dst_spm_addr & (Addr(1) << 59);
+        // A finalizing shared writeback carries its scalar and command marker
+        // beside the slot. Preserve these through O3 metadata capture; Ruby
+        // canonicalizes the address before cache lookup and sends the scalar
+        // separately. Ordinary copy/multicast metadata is unchanged.
+        const Addr finalize = shared && isSPMWBStore() &&
+            (dst_spm_addr & (Addr(1) << 57)) ?
+            dst_spm_addr & ((Addr(1) << 57) | (Addr(0xffffffff) << 24)) : 0;
+        _spmMulticastMask = shared ? 0 : static_cast<uint8_t>((dst_spm_addr >> 24) & 0xff);
+        _spmMulticastClaim = !shared && ((dst_spm_addr >> 23) & 0x1) != 0;
+        dst_spm_addr &= shared ? ((Addr(1) << 59) | 0x77ffff) : 0x7ffff;
+        dst_spm_addr |= finalize;
         _spmSrcAddr = src_addr;
         _spmDstAddr = dst_spm_addr;
         _spmSet = static_cast<int>((dst_spm_addr >> 6) & 0x3ff);
-        _spmWay = static_cast<int>(dst_spm_addr >> 16);
+        _spmWay = static_cast<int>((dst_spm_addr >> 16) & 0x7);
         privateFlags.set(VALID_SPM_METADATA);
     }
     Addr getSPMSrcAddr() const // C6
@@ -1091,6 +1124,8 @@ class Request : public Extensible<Request>
         return hasSPMMetadata() ? _spmWay :
             static_cast<int>(_paddr >> 16);
     }
+    uint8_t getSPMMulticastMask() const { return _spmMulticastMask; }
+    bool isSPMMulticastClaim() const { return _spmMulticastClaim; }
     bool
     isPrefetch() const
     {

@@ -43,6 +43,7 @@
 #define __MEM_RUBY_STRUCTURES_CACHEMEMORY_HH__
 
 #include <unordered_map>
+#include <map>
 #include <vector>
 
 #include "base/statistics.hh"
@@ -63,6 +64,8 @@ namespace gem5
 
 namespace ruby
 {
+
+class WriteMask;
 
 class CacheMemory : public SimObject
 {
@@ -102,8 +105,29 @@ class CacheMemory : public SimObject
     AbstractCacheEntry* allocate(Addr address, AbstractCacheEntry* new_entry);
     AbstractCacheEntry* allocateSPMSlot(Addr address, int spm_set, int spm_way,
                                         AbstractCacheEntry* new_entry);
+    bool prepareSPMSlot(int spm_set, int spm_way);
+    bool prepareL3SPM(Addr address, int size);
+    Addr l3SPMVictim() const { return m_l3_spm_victim; }
+    Addr l3SPMSlot(Addr address, int index) const;
+    void validateL3SPM(Addr address, int size) const;
+    Addr l3ReductionConflict(Addr address, int size) const;
+    void l3ReductionReserve(Addr address);
+    void l3ReductionRelease(Addr address);
+    void l3ReductionReserve(Addr address, int size);
+    void l3ReductionRelease(Addr address, int size);
+    DataBlock l3FinalizeResult(Addr address, Addr scale);
+    DataBlock l3ReductionResult(Addr address, const DataBlock& contribution, Addr scale);
+    void l3ReductionStart(int active);
+    void l3ReductionFinish();
+    std::map<Addr, Addr> l3ReductionOwners;
+    Addr spmSlotVictim(int spm_set, int spm_way) const;
+    void releaseSPMSlot(Addr address);
     DataBlock readSPMData(Addr address, int size);
     void writeSPMData(Addr address, const DataBlock& data, int size);
+    void writeSPMDataMasked(Addr address, const DataBlock& data, int size,
+                           const WriteMask& mask);
+    void writeSPMDataImpl(Addr address, const DataBlock& data, int size,
+                         const WriteMask* mask);
     void allocateVoid(Addr address, AbstractCacheEntry* new_entry)
     {
         allocate(address, new_entry);
@@ -180,6 +204,7 @@ class CacheMemory : public SimObject
     // already holds an SPM line (re-install over X without prior SPM_release)
     // or if no eligible relocation way exists.
     void migrateOrClearSPMSlot(int cacheSet, int spm_way);
+    int spmPhysicalSet(int logical_set, int logical_way) const;
 
     // Private copy constructor and assignment operator
     CacheMemory(const CacheMemory& obj);
@@ -192,7 +217,11 @@ class CacheMemory : public SimObject
     // The first index is the # of cache lines.
     // The second index is the the amount associativity.
     std::unordered_map<Addr, int> m_tag_index;
+    // Simulator tag-location bookkeeping only, like m_tag_index. Hardware
+    // computes the set from the SPM way/slot; no new modeled storage capacity.
+    std::unordered_map<Addr, int> m_spm_tag_sets;
     std::vector<std::vector<AbstractCacheEntry*> > m_cache;
+    std::vector<std::vector<bool>> m_spm_slot_reserved;
 
     /** We use the replacement policies from the Classic memory system. */
     replacement_policy::Base *m_replacementPolicy_ptr;
@@ -205,9 +234,13 @@ class CacheMemory : public SimObject
     int m_cache_num_sets;
     int m_cache_num_set_bits;
     int m_cache_assoc;
-    // Low ways [0, m_num_spm_ways) are reserved for SPM lines; coherent data
-    // is confined to ways [m_num_spm_ways, m_cache_assoc). 0 = no reservation.
+    int m_coherent_assoc;
+    bool m_spm_separate_backing;
+    unsigned m_spm_set_stride;
+    // Low ways [0, m_num_spm_ways) may be dynamically claimed as SPM lines.
+    // Until claimed (and again after release), they remain coherent capacity.
     int m_num_spm_ways;
+    Addr m_l3_spm_victim = 0;
     int m_start_index_bit;
     bool m_resource_stalls;
     int m_block_size;
@@ -242,6 +275,12 @@ class CacheMemory : public SimObject
           CacheMemoryStats(statistics::Group *parent);
 
           statistics::Scalar numDataArrayReads;
+          statistics::Scalar l3ReductionStarts;
+          statistics::Scalar l3ReductionFinishes;
+          statistics::Scalar l3ReductionMaxActive;
+          statistics::Scalar l3ReductionHalfCommands;
+          statistics::Scalar l3ReductionInitializations;
+          statistics::Scalar l3Finalizations;
           statistics::Scalar numDataArrayWrites;
           statistics::Scalar numTagArrayReads;
           statistics::Scalar numTagArrayWrites;

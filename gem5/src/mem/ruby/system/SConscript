@@ -62,6 +62,8 @@ Source('RubyPort.cc')
 Source('RubyPortProxy.cc')
 Source('RubySystem.cc')
 Source('Sequencer.cc')
+Source('SequencerReduction.cc')
+DebugFlag('CacheFlexReductionTrace')
 if env['CONF']['BUILD_GPU']:
     Source('VIPERCoalescer.cc')
     Source('VIPERSequencer.cc')
